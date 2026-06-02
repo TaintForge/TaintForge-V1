@@ -8,7 +8,8 @@ against a live instance.
 The model (Codex) is the analyst. Tools are its hands. Deterministic work — parsing, SAST
 hints, ranking — is done by scripts; judgment — application understanding, taint reasoning,
 sanitizer calls, logic/IDOR bugs, PoC crafting — is done by the agent. One contract glues
-them together: the *finding* schema.
+them together: the *finding* schema. For a deep, feature-by-feature and
+workflow-by-workflow walkthrough, see **[DOCS.md](DOCS.md)**.
 
 ```
         ┌────────────────────────────────────────────────────────────┐
@@ -31,11 +32,12 @@ them together: the *finding* schema.
                                         ▼
         ┌───────────────────────────────────────────────────────────────┐
         │ C  CONSUMER (Codex)   runs continuously while A & B produce      │
-        │   cross-validate (CodeQL/OpenGrep) → reproduce (live) → triage   │
+        │   cross-validate (CodeQL/OpenGrep) → reproduce live (probe.py     │
+        │   sessions + SSRF canary) → web-search disclosure → PoC → triage  │
         └───────────────┬───────────────────────────────────────────────┘
                         │ repro fails → needs_reanalysis → back to A/B (feedback)
                         ▼
-              workspace/report/report.md
+       workspace/report/report.md   +   report/<id>/{poc.py, finding.md}
 ```
 
 ## How it works
@@ -50,13 +52,18 @@ queue (`workspace/findings/`) — a streaming producer-consumer (watch them live
 - **B — producer (logic / access-control):** IDOR/BOLA, missing authorization, privilege
   escalation, auth/session bypass, business-logic flaws. The bugs SAST tools can't see.
 - **C — consumer (convergence):** cross-validates statically, reproduces dynamically
-  against a live instance, triages and ranks into a report — looping while A and B work.
+  against a live instance (session-aware `probe.py` + out-of-band SSRF `canary.py`),
+  web-searches whether each reproduced bug is a known CVE or **novel (potential 0-day)**,
+  writes a runnable `poc.py` per vuln, then triages/ranks — looping while A and B work.
 
 Each session is **one long, self-driving session** — it reads code, finds, records, and
 digs deeper on its own. The shell never re-invokes an agent per module (which would reset
-its memory). `write_finding.py` is file-locked, so the three sessions never corrupt the
-same finding. A and B produce concurrently; C consumes as findings appear; failed
-reproductions route back as `needs_reanalysis` (the feedback loop).
+its memory). But a `codex exec` session is finite — it ends when the agent decides it's
+done or hits a token limit — so each role runs under a **shell supervisor that respawns it**
+on exit until a deadline (`MAX_HOURS`, default 12h) or a `workspace/_stop` flag. That's what
+keeps C alive to consume findings that arrive late. `write_finding.py` is file-locked, so
+the three sessions never corrupt the same finding. A and B produce concurrently; C consumes
+as findings appear; failed reproductions route back as `needs_reanalysis` (feedback loop).
 
 Status lifecycle of a finding:
 ```
@@ -83,15 +90,22 @@ taintforge/                         ← repo root (run from here)
     source-model/   build the Code Model (structural + comprehension); coverage.py, callgraph.py
     vuln-track-a/   injection/data-flow finder; run_semgrep.sh leads, rules/
     vuln-track-b/   logic/access-control finder; build_authz_matrix.py
-    convergence/    cross_validate.sh, correlate.py, probe.py, triage.py, queue.py, dashboard.py
+    convergence/    cross_validate.sh, correlate.py, probe.py (session/--jar),
+                    canary.py (SSRF OOB), triage.py, emit_poc.py, queue.py, dashboard.py
   targets/                          ← code under assessment (read-only)
   workspace/
     CODE_MODEL.json                 ← structural + comprehension
     coverage.json                   ← module list / analysis progress
     hints/                          ← optional tool leads (not findings)
     findings/<id>.json              ← the queue; every finding authored by Codex
-    report/report.md                ← the deliverable
-    _log_{A,B,C}.txt                ← per-session reasoning logs
+    report/report.md                ← rolling ranked index (incl. ⚠️ potential 0-day section)
+    report/<id>/poc.py              ← per-vuln runnable PoC (reproduced/confirmed only)
+    report/<id>/finding.md          ← per-vuln individual report
+    _accounts.json                  ← copied test accounts (live auth/IDOR)
+    _canary.log                     ← SSRF out-of-band callback hits
+    _pids                           ← supervisor pids (stop handle)
+    _stop                           ← touch this to stop all supervisors
+    _log_{A,B,C}.txt                ← per-session reasoning logs (appended across respawns)
 ```
 
 ## The Code Model
@@ -159,8 +173,9 @@ If Codex logs `failed to load skill ... YAML frontmatter`, run `python3 fix_skil
 `start.sh` opens a **tmux 4-pane live view** — 🅐 inject | 🅑 logic | 🅒 converge and a
 dashboard pane (coverage bar, findings by status/class, latest hits, elapsed time). Detach
 with `Ctrl-b` then `d` (sessions keep running); re-attach with `tmux attach -t taintforge`.
-Stop everything: `kill $(cat workspace/_pids); tmux kill-session -t taintforge`. If tmux
-isn't installed, `start.sh` falls back to a plain headless run.
+Stop everything (the `_stop` flag must come first, or supervisors respawn):
+`touch workspace/_stop; kill $(cat workspace/_pids); pkill -f 'codex exec'; tmux kill-session -t taintforge`.
+If tmux isn't installed, `start.sh` falls back to a plain headless run.
 
 Headless / no-tmux (logs go to `workspace/_log_{A,B,C}.txt`):
 ```bash
@@ -178,13 +193,19 @@ rather than guessed. Accounts are copied to `workspace/_accounts.json`; requests
 go to the URL you pass.
 
 Runs with `--sandbox workspace-write` (writes `workspace/`, `targets/` stays read-only).
-Three concurrent sessions ≈ 3× tokens. Override the agent command with `CODEX_CMD`:
+Three concurrent sessions ≈ 3× tokens. Dynamic reproduction and disclosure search need the
+sandbox's **network** and **web search** enabled, so use a `CODEX_CMD` like:
 ```bash
-CODEX_CMD="codex exec --sandbox workspace-write --model gpt-5.5" ./audit.sh -u http://localhost:8080 targets/<app>
+CODEX_CMD="codex exec --sandbox workspace-write \
+  --config sandbox_workspace_write.network_access=true \
+  --config web_search=live" \
+  ./start.sh -u http://127.0.0.1:32778 targets/<app>
 ```
+Without `network_access` the live probes fail with `Operation not permitted`; without
+`web_search` the known-vs-novel (0-day) classification can't run.
 
-To run longer or continue, re-run `./audit.sh` — state in `workspace/` persists, so the
-agents pick up and dig deeper. Ctrl-C stops all three sessions.
+Sessions auto-respawn until `MAX_HOURS` (default 12) or `workspace/_stop`. To run longer,
+raise `MAX_HOURS=24`. State in `workspace/` persists across runs, so agents dig deeper.
 
 ### Watch progress
 
@@ -196,6 +217,43 @@ python3 .agents/skills/convergence/scripts/queue.py --counts   # queue by status
 python3 .agents/skills/source-model/scripts/coverage.py --summary
 ls workspace/findings | wc -l
 ```
+
+## Dynamic reproduction (live target)
+
+When you pass `-u/--url`, the convergence session proves findings against the running app:
+
+- **`probe.py`** is **session-aware**: `--jar FILE` persists cookies across calls, so the
+  agent can log in (it works out the login route/CSRF/cookie from the code itself) and then
+  hit protected resources with that session. `--no-redirect` exposes `Location`; the JSON
+  result surfaces `status`, `set_cookie`, `cookies`, timing, and a body snippet.
+- **IDOR/authz** is proven by replaying **two identities**: log alice and bob into separate
+  jars, then request bob's object with alice's jar — a `200` with bob's data confirms it.
+  This needs ≥2 normal accounts in `accounts.json` (admin alone can't prove cross-user access).
+- **SSRF / blind** uses **`canary.py`**, an out-of-band HTTP listener auto-started on `--url`
+  (`127.0.0.1:9111`). The agent makes the target fetch `http://<canary>/<token>`, then
+  `canary.py check <token>` — a HIT proves SSRF. Internal/blind SSRF without a callback is
+  judged by response/timing differences against internal hosts.
+
+## Disclosure: known CVE vs novel 0-day
+
+Once a finding is **reproduced/confirmed**, C web-searches the product+version+vuln against
+CVE/NVD, vendor and GitHub advisories, and changelogs, then sets `disclosure.status`:
+`known` (with CVE/refs), `novel` (no public report — **potential 0-day**), or `inconclusive`.
+Novel reproduced findings are surfaced in a **⚠️ Potential 0-day** section at the top of the
+report and counted on the dashboard. (Requires `--config web_search=live`.)
+
+## Per-vulnerability PoC + report
+
+For every reproduced/confirmed finding, the agent writes a `poc.py` tailored to that bug
+(using `requests`; pre-auth bugs have no login step, multi-step flows have as many requests
+as needed, with a clear PASS/FAIL). `emit_poc.py` then materializes one folder per vuln:
+```
+workspace/report/<id>/poc.py        # standalone, re-run with: python3 poc.py
+workspace/report/<id>/finding.md    # that vuln's individual report
+```
+Per-vuln reports are kept separate (never merged); `report.md` stays as the ranked index.
+The dashboard regenerates `report.md` and the per-vuln folders every few seconds, so they're
+never stale.
 
 ## Design principles
 

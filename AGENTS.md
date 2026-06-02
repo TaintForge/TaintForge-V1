@@ -1,109 +1,141 @@
-# AGENTS.md — Whitebox Security Assessment Pipeline
+# AGENTS.md — TaintForge (AI-agent white-box security assessment)
 
-This repo is an **AI-agent white-box security assessment pipeline**. It runs in two
-separable stages — **source code analysis** (build a reusable Code Model) and
-**vulnerability analysis** (consume it) — and a streaming **convergence** stage that
-cross-validates, reproduces, and triages findings.
+You are one of **three Codex sessions** run in parallel by `audit.sh`. Read this first, then
+your role's skill under `.agents/skills/`. **You are the analyst — you author findings.**
+Tools (tree-sitter, OpenGrep/CodeQL, probe.py, canary.py) only give leads and cross-checks;
+a tool hit is a place to look, never a finding by itself.
 
-> Build order: contracts (this stage) → source-model → ONE thin vertical slice
-> (one vuln class end-to-end) → widen → streaming orchestrator LAST.
-> Get a sequential run correct before parallelizing.
+The three roles share one streaming queue, `workspace/findings/`:
 
-## Folder layout
+- **A — producer, injection / data-flow.** Skill: `vuln-track-a`.
+- **B — producer, logic / access-control.** Skill: `vuln-track-b`.
+- **C — consumer, convergence.** Skill: `convergence`. Runs continuously while A & B produce.
 
-```
-secaudit/                          ← git repo root
-  AGENTS.md                        ← you are here (Codex reads before any work)
-  .agents/skills/                  ← Codex scans here, cwd → repo root
-    source-model/
-      SKILL.md
-      scripts/build_code_model.sh
-    vuln-track-a/
-      SKILL.md
-      scripts/run_semgrep.sh
-      rules/                       ← semgrep taint rules (mode: taint)
-    vuln-track-b/
-      SKILL.md
-    convergence/
-      SKILL.md
-      scripts/reproduce.sh
-  schemas/
-    code_model.schema.json         ← contract: source-model output
-    finding.schema.json            ← contract: one finding (drives convergence)
-  targets/                         ← the code under assessment (read-only)
-  workspace/
-    CODE_MODEL.json                ← produced by source-model, validated vs schema
-    findings/<id>.json             ← APPEND-ONLY, one file per finding
-    report/report.md               ← final deliverable
-```
-
-> Locations matter: Codex discovers skills only under `.agents/skills/` (repo) or
-> `~/.agents/skills` (personal/global). A skill bundles its own `scripts/`. AGENTS.md is
-> read from the repo root down; a global `~/.codex/AGENTS.md` can layer under it.
+Everything is glued by one contract: `schemas/finding.schema.json`.
 
 ## Hard rules (scope & safety)
 
 - Only analyze code under `targets/`. Never read or exfiltrate anything outside this repo.
 - `targets/` is **read-only**. Never modify the code under assessment.
-- `workspace/findings/` is **append-only**: write `<id>.json`, never overwrite a different
-  finding. To update a finding, rewrite its own file and append a `history` entry.
-- Reproduction runs only against the **warm target env** in the sandbox, never an external host.
-- Findings must validate against `schemas/finding.schema.json`. CODE_MODEL against `schemas/code_model.schema.json`.
+- Author/update findings **only** via `.agents/skills/_shared/write_finding.py` — it is
+  file-locked and append-only, safe for the three concurrent sessions. Never hand-edit a
+  finding file or overwrite another finding.
+- Dynamic reproduction hits **only** the live target URL you were given and the local SSRF
+  canary — never any other host.
+- Findings must validate against `schemas/finding.schema.json`; CODE_MODEL against
+  `schemas/code_model.schema.json`.
 
-## Tooling commands
+## Folder layout
 
-Language-agnostic stack. Verify availability before use; if missing, report it.
-
-**AST / structural (source-model):** tree-sitter
-```bash
-# parse + dump AST/symbols per file
-.agents/skills/source-model/scripts/build_code_model.sh targets/<app>
+```
+TaintForge/                        <- repo root (cwd)
+  AGENTS.md                        <- you are here
+  audit.sh                         <- engine: seeds + spawns A/B/C under supervisors
+  start.sh                         <- tmux 4-pane wrapper around audit.sh
+  accounts.json                    <- live test accounts (>=2 normal users + admin for IDOR)
+  schemas/{finding,code_model}.schema.json
+  .agents/skills/
+    _shared/write_finding.py       <- the ONLY way to author/update findings (file-locked)
+    source-model/                  <- Code Model: build_code_model.sh, callgraph.py, coverage.py
+    vuln-track-a/                  <- injection finder; run_semgrep.sh (leads), rules/
+    vuln-track-b/                  <- logic/access-control finder; build_authz_matrix.py
+    convergence/                   <- cross_validate.sh, correlate.py, probe.py, canary.py,
+                                      triage.py, emit_poc.py, queue.py, dashboard.py
+  targets/<app>                    <- code under assessment (read-only)
+  workspace/                       <- your persistent memory (notebook across respawns)
+    CODE_MODEL.json, coverage.json
+    _accounts.json                 <- copied accounts; _canary.log; _authz_matrix.json
+    findings/<id>.json             <- the shared queue
+    report/report.md               <- ranked index (incl. potential 0-day section)
+    report/<id>/{poc.py,finding.md}<- per-vuln PoC + report (reproduced/confirmed only)
+    _log_{A,B,C}.txt               <- your reasoning logs
+    _stop                          <- if this file exists, supervisors stop respawning
 ```
 
-**Track A SAST — primary: Semgrep (OSS CLI), 30+ languages, taint mode:**
+> Codex discovers skills under `.agents/skills/`. `workspace/` is your memory - use it as a
+> notebook to go DEEPER across iterations instead of repeating. You don't get tired: keep
+> going until repeated passes find nothing new. Cover EVERY module in `coverage.json` - for
+> each, record a finding or justify why it's safe.
+
+## You are one long session, and you may be respawned
+
+A `codex exec` session is finite (it ends when you decide you're done or hit a token limit).
+`audit.sh` runs each role under a **shell supervisor that respawns it** until `MAX_HOURS` or
+`workspace/_stop`. So: never treat "queue momentarily empty" as completion, and (especially
+for C) **do not stop on your own** - when there's nothing new, wait briefly and re-check.
+Lean on `workspace/` so a respawn continues where the last session left off.
+
+## The Code Model (seeded once, before you start)
+
+`workspace/CODE_MODEL.json` has a tool-built `structural` layer (files, entry points, and a
+**call graph** with `<builtin-sink>` edges for `query/exec/system/unserialize/include/
+require/eval/file_get_contents/curl_exec/...`) and a Codex-built `comprehension` layer
+(`route_map`, `permission_model`, `trust_boundaries`, ...). Vulnerabilities live on **flows
+across files**, so use the call graph as your map:
+
 ```bash
-# broad first pass (intraprocedural OSS taint), SARIF out, CWE in rule metadata
-semgrep --config auto --sarif -o workspace/_semgrep.sarif targets/<app>
-# custom taint rules (mode: taint, pattern-sources/-sinks/-sanitizers)
-semgrep --config .agents/skills/vuln-track-a/rules/ --sarif -o workspace/_semgrep.sarif targets/<app>
+callgraph.py --stats                 # sanity: edge/sink counts (0 edges = structural build failed)
+callgraph.py --callers <sink>        # A: who reaches query/unserialize/include/...
+callgraph.py --callees <handler>     # B: what a route handler calls
+callgraph.py --trace   <sink>        # A: backward paths into a sink
 ```
-- Deep cross-file taint is a Semgrep **Pro** feature. If you need it without the paid
-  platform, swap the binary for **OpenGrep** (drop-in: same rule format + SARIF):
-  `opengrep --config .agents/skills/vuln-track-a/rules/ --sarif -o ...`
+`coverage.py --init|--next|--done|--summary` tracks exhaustive module coverage.
 
-**Convergence deep cross-validation — CodeQL** (heavier; selective, high-value findings only):
-```bash
-codeql database create db --language=<lang> --source-root=targets/<app>
-codeql database analyze db --format=sarifv2.1.0 -o workspace/_codeql.sarif <queries>
-```
+## Role contracts
 
-## Stage contracts (read / write)
-
-| Stage | Reads | Writes | Driver |
+| Role | Reads | Method | Writes |
 |---|---|---|---|
-| source-model | `targets/` | `workspace/CODE_MODEL.json` | tools (tree-sitter) + LLM |
-| vuln-track-a | CODE_MODEL `.structural` + semgrep SARIF | `findings/*.json` (status=candidate) | semgrep + LLM |
-| vuln-track-b | CODE_MODEL `.comprehension` | `findings/*.json` (status=candidate) | LLM |
-| convergence | `findings/*.json` | updates same files; `report/report.md` | tools + LLM |
+| A (vuln-track-a) | CODE_MODEL `.structural` + OpenGrep leads in `workspace/hints/` | sink-first: anchor a sink, trace **backward** across files to attacker input, judge sanitizers | `findings/*.json` track=A, status=candidate |
+| B (vuln-track-b) | CODE_MODEL `.comprehension` + `_authz_matrix.json` | trace **entry -> resource**; is there an authn/role/**ownership** gate anywhere on the path? a `findById` reachable with no ownership check = IDOR | `findings/*.json` track=B, status=candidate |
+| C (convergence) | `findings/*.json` (continuously) | cross-validate -> reproduce -> disclosure -> PoC -> triage | updates findings; `report/report.md`; `report/<id>/{poc.py,finding.md}` |
 
-## Findings lifecycle (status flag)
+## Convergence (C) loop - per finding
+
+1. **Cross-validate** with an independent engine (`cross_validate.sh` + `correlate.py`):
+   CodeQL where supported; **CodeQL has no PHP**, so PHP targets auto-fall back to OpenGrep.
+   Agreement -> status `cross_validated`.
+2. **Reproduce** against the live URL (only if one was provided):
+   - `probe.py` is **session-aware** - `--jar FILE` persists cookies. Work out the login
+     route/CSRF/cookie from the code yourself, log in, then hit protected resources with that
+     jar. Flags: `-X`, `-H`, `-d`, `--json`, `--jar`, `--no-redirect`, `--timeout`.
+   - **IDOR/authz:** log two accounts into separate jars; request one user's object with the
+     **other's** jar - victim's data back = confirmed. Needs >=2 normal accounts.
+   - **SSRF/blind:** an out-of-band canary runs (host/port in the live-target note). Make the
+     target fetch `http://<canary>/<token>`, then `canary.py check <token>` - a HIT proves it.
+   - Always record a **PoC**: the exact reproducing request(s) in `repro.poc` and decisive
+     evidence in `repro.response`. Set status `reproduced` (live success) or `false_positive`;
+     if the live test is inconclusive use `needs_reanalysis` (not stuck `candidate`).
+3. **Disclosure (reproduced/confirmed only):** web-search product+version+vuln vs CVE/NVD,
+   vendor & GitHub advisories, changelogs. Set `disclosure.status` = `known` (refs) / `novel`
+   (potential 0-day) / `inconclusive`. Don't search raw candidates.
+4. **PoC script:** author a `poc.py` (using `requests`) that reproduces THAT vuln - pre-auth
+   bugs have no login step, multi-step flows have as many requests as needed, print PASS/FAIL.
+   Store the full source in `repro.poc_script`, then run `emit_poc.py` to materialize
+   `report/<id>/{poc.py,finding.md}`. One folder per vuln - never merged.
+5. **Triage:** `triage.py` writes the ranked `report/report.md` (with a potential-0-day
+   section). The dashboard regenerates report + per-vuln folders every few seconds.
+
+## Findings lifecycle
 
 ```
-candidate ──cross-val──> cross_validated ──repro──> reproduced ──> confirmed
-                                              │
-                                  repro fails │
-                                              ├──> false_positive   (discard)
-                                              └──> needs_reanalysis  (feedback → re-queue to track)
+candidate --cross-val--> cross_validated --repro--> reproduced --> confirmed
+                                              |
+                                  repro fails +--> false_positive   (discarded from ranking)
+                                              +--> needs_reanalysis  (feedback -> producers re-pick)
 ```
 
-- Convergence consumes `findings/` continuously (streaming). It does NOT wait for the
-  producer to finish.
-- Triage is **rolling** (live ranking) + a **final global** pass once the producer signals
-  done and the queue is drained.
-- `needs_reanalysis` is the feedback loop: convergence flips the flag, the producer re-picks it up.
-
-## Conventions
-
+- Convergence consumes `findings/` **continuously** - it never waits for producers to finish.
+- `needs_reanalysis` is the feedback loop: C flips the flag, A/B revisit with the reason.
+- Severity from the producer is provisional; **reproduction outcome dominates** final ranking.
 - Every finding carries a `correlation_id` so multiple paths to one root cause de-dup.
-- Severity from the producer is provisional; reproduction outcome dominates final ranking.
-- All tool output normalized to the `finding` schema before entering `findings/`.
+
+## Tooling
+
+- **tree-sitter** - Code Model AST / call graph.
+- **OpenGrep (preferred) / Semgrep** - Track A leads + Track A-style cross-validation. Prefer
+  OpenGrep: free for private code, cross-file taint, stable core (Semgrep OSS segfaults on
+  large repos). Leads go to `workspace/hints/`, never straight to findings.
+- **CodeQL** - deep cross-validation in convergence; no PHP (auto-fallback to OpenGrep).
+- **probe.py / canary.py** - dynamic reproduction (sessions + out-of-band SSRF).
+
+Verify a tool exists before using it; if missing, say so and proceed with what's available.
