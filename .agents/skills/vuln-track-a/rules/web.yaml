@@ -1,0 +1,121 @@
+# Track A - additional injection/web classes (offline baseline). Breadth beyond
+# this comes from vendored community rules (rules/vendor/, see fetch_rules.sh)
+# and, when online, the Semgrep registry.
+rules:
+  # ---------- Reflected XSS (CWE-79) ----------
+  - id: ta-xss-reflected
+    mode: taint
+    languages: [javascript, typescript, python]
+    severity: ERROR
+    message: User input reaches an HTTP response/HTML sink without encoding (XSS).
+    metadata: { vuln_class: xss, cwe: "CWE-79", track: A }
+    pattern-sources:
+      - pattern: req.query
+      - pattern: req.body
+      - pattern: req.params
+      - pattern: request.args
+      - pattern: request.GET
+    pattern-sanitizers:
+      - pattern: escape(...)
+      - pattern: $X.escape(...)
+      - pattern: encodeURIComponent(...)
+      - pattern: escapeHtml(...)
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: res.send(...)
+              - pattern: res.write(...)
+              - pattern: res.end(...)
+              - pattern: $EL.innerHTML = $SINK
+              - pattern: document.write(...)
+
+  # ---------- Open redirect (CWE-601) ----------
+  - id: ta-open-redirect
+    mode: taint
+    languages: [javascript, typescript, python]
+    severity: WARNING
+    message: User input controls a redirect target (open redirect).
+    metadata: { vuln_class: open-redirect, cwe: "CWE-601", track: A }
+    pattern-sources:
+      - pattern: req.query
+      - pattern: req.body
+      - pattern: req.params
+      - pattern: request.args
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: res.redirect(...)
+              - pattern: window.location = $SINK
+              - pattern: HttpResponseRedirect(...)
+
+  # ---------- Server-side template injection (CWE-1336) ----------
+  - id: ta-ssti
+    mode: taint
+    languages: [javascript, typescript, python]
+    severity: ERROR
+    message: User input reaches a template renderer (SSTI).
+    metadata: { vuln_class: ssti, cwe: "CWE-1336", track: A }
+    pattern-sources:
+      - pattern: req.query
+      - pattern: req.body
+      - pattern: req.params
+      - pattern: request.args
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: Template(...)
+              - pattern: render_template_string(...)
+              - pattern: $ENV.from_string(...)
+
+  # ---------- NoSQL injection (CWE-943) ----------
+  - id: ta-nosql-injection
+    mode: taint
+    languages: [javascript, typescript]
+    severity: ERROR
+    message: User input reaches a NoSQL query (NoSQL injection).
+    metadata: { vuln_class: nosql-injection, cwe: "CWE-943", track: A }
+    pattern-sources:
+      - pattern: req.query
+      - pattern: req.body
+      - pattern: req.params
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: $C.find(...)
+              - pattern: $C.findOne(...)
+              - pattern: $C.where(...)
+
+  # ---------- Insecure deserialization (CWE-502) ----------
+  - id: ta-insecure-deserialization
+    mode: taint
+    languages: [python, javascript, typescript]
+    severity: ERROR
+    message: User input reaches an unsafe deserializer (insecure deserialization).
+    metadata: { vuln_class: deserialization, cwe: "CWE-502", track: A }
+    pattern-sources:
+      - pattern: request.body
+      - pattern: req.body
+      - pattern: request.data
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: pickle.loads(...)
+              - pattern: yaml.load(...)
+              - pattern: marshal.loads(...)
+
+  # ---------- LDAP injection (CWE-90) ----------
+  - id: ta-ldap-injection
+    mode: taint
+    languages: [python, javascript, typescript]
+    severity: WARNING
+    message: User input reaches an LDAP filter (LDAP injection).
+    metadata: { vuln_class: ldap-injection, cwe: "CWE-90", track: A }
+    pattern-sources:
+      - pattern: req.query
+      - pattern: req.body
+      - pattern: request.args
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: $C.search(...)
+              - pattern: $C.search_s(...)

@@ -1,0 +1,5 @@
+# Structural extraction deps for build_code_model.py
+# Let the language-pack resolve its own tree-sitter core. Do NOT pin tree-sitter
+# separately or you reintroduce the bytes/str API mismatch.
+tree-sitter-language-pack
+jsonschema

@@ -1,0 +1,113 @@
+# Track A — injection / data-flow family. Custom taint rules (mode: taint) that
+# work OFFLINE (no registry fetch). Augment with registry rulesets when online
+# (see run_semgrep.sh). Each rule carries vuln_class + cwe + track in metadata so
+# the normalizer can map results straight into the finding schema.
+rules:
+  # ---------- SQL injection (CWE-89) ----------
+  - id: ta-sql-injection
+    mode: taint
+    languages: [javascript, typescript, python]
+    severity: ERROR
+    message: User input reaches a SQL query without sanitization (SQL injection).
+    metadata: { vuln_class: sql-injection, cwe: "CWE-89", track: A }
+    pattern-sources:
+      - pattern: req.query
+      - pattern: req.body
+      - pattern: req.params
+      - pattern: request.GET
+      - pattern: request.POST
+      - pattern: request.args
+    pattern-sanitizers:
+      - pattern: parseInt(...)
+      - pattern: Number(...)
+      - pattern: $X.escape(...)
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: $DB.query(...)
+              - pattern: sequelize.query(...)
+              - pattern: $X.raw(...)
+              - pattern: cursor.execute(...)
+              - pattern: $C.execute(...)
+
+  # ---------- Command injection (CWE-78) ----------
+  - id: ta-command-injection
+    mode: taint
+    languages: [javascript, typescript, python]
+    severity: ERROR
+    message: User input reaches an OS command (command injection).
+    metadata: { vuln_class: command-injection, cwe: "CWE-78", track: A }
+    pattern-sources:
+      - pattern: req.query
+      - pattern: req.body
+      - pattern: req.params
+      - pattern: request.args
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: child_process.exec(...)
+              - pattern: child_process.execSync(...)
+              - pattern: exec(...)
+              - pattern: os.system(...)
+              - pattern: subprocess.$F(...)
+
+  # ---------- Code injection / eval (CWE-94) ----------
+  - id: ta-code-injection
+    mode: taint
+    languages: [javascript, typescript, python]
+    severity: ERROR
+    message: User input reaches a dynamic code evaluator (code injection).
+    metadata: { vuln_class: code-injection, cwe: "CWE-94", track: A }
+    pattern-sources:
+      - pattern: req.query
+      - pattern: req.body
+      - pattern: req.params
+      - pattern: request.args
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: eval(...)
+              - pattern: Function(...)
+
+  # ---------- Path traversal (CWE-22) ----------
+  - id: ta-path-traversal
+    mode: taint
+    languages: [javascript, typescript, python]
+    severity: WARNING
+    message: User input reaches a filesystem path (path traversal).
+    metadata: { vuln_class: path-traversal, cwe: "CWE-22", track: A }
+    pattern-sources:
+      - pattern: req.query
+      - pattern: req.body
+      - pattern: req.params
+      - pattern: request.args
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: fs.readFile(...)
+              - pattern: fs.readFileSync(...)
+              - pattern: fs.createReadStream(...)
+              - pattern: open(...)
+              - pattern: res.sendFile(...)
+
+  # ---------- SSRF (CWE-918) ----------
+  - id: ta-ssrf
+    mode: taint
+    languages: [javascript, typescript, python]
+    severity: WARNING
+    message: User input reaches an outbound request URL (SSRF).
+    metadata: { vuln_class: ssrf, cwe: "CWE-918", track: A }
+    pattern-sources:
+      - pattern: req.query
+      - pattern: req.body
+      - pattern: req.params
+      - pattern: request.args
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: axios.get(...)
+              - pattern: axios(...)
+              - pattern: fetch(...)
+              - pattern: requests.get(...)
+              - pattern: requests.post(...)
+              - pattern: urllib.request.urlopen(...)
