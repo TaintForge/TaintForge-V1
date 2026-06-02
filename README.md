@@ -41,7 +41,8 @@ them together: the *finding* schema.
 ## How it works
 
 TaintForge runs as **three parallel autonomous Codex sessions** that share the findings
-queue (`workspace/findings/`) — a streaming producer-consumer:
+queue (`workspace/findings/`) — a streaming producer-consumer (watch them live in the
+`start.sh` tmux dashboard):
 
 - **A — producer (injection / data-flow):** SQLi, command/code injection, XSS, SSRF, path
   traversal, file inclusion, deserialization, XXE, SSTI, NoSQL, open redirect. Enumerates
@@ -69,7 +70,8 @@ candidate ──> cross_validated ──> reproduced ──> confirmed
 
 ```
 taintforge/                         ← repo root (run from here)
-  audit.sh                          ← the launcher (A | B | C in parallel)
+  start.sh                          ← tmux launcher: 4-pane live dashboard (A | B | C | stats)
+  audit.sh                          ← engine: seeds + spawns the 3 parallel sessions
   accounts.json[.example]           ← test accounts for dynamic auth/IDOR testing
   fix_skills.py                     ← repairs SKILL.md YAML frontmatter if Codex can't load
   AGENTS.md                         ← operating contract Codex reads first
@@ -81,7 +83,7 @@ taintforge/                         ← repo root (run from here)
     source-model/   build the Code Model (structural + comprehension); coverage.py, callgraph.py
     vuln-track-a/   injection/data-flow finder; run_semgrep.sh leads, rules/
     vuln-track-b/   logic/access-control finder; build_authz_matrix.py
-    convergence/    cross_validate.sh, correlate.py, probe.py, triage.py, queue.py
+    convergence/    cross_validate.sh, correlate.py, probe.py, triage.py, queue.py, dashboard.py
   targets/                          ← code under assessment (read-only)
   workspace/
     CODE_MODEL.json                 ← structural + comprehension
@@ -150,8 +152,19 @@ If Codex logs `failed to load skill ... YAML frontmatter`, run `python3 fix_skil
 ## Run
 
 ```bash
-./audit.sh targets/<app>                              # static only (no live server)
-./audit.sh -u http://localhost:8080 targets/<app>     # + dynamic reproduction & analysis
+./start.sh -u http://localhost:8080 targets/<app>     # tmux dashboard (recommended)
+./start.sh targets/<app>                              # static only, with dashboard
+```
+
+`start.sh` opens a **tmux 4-pane live view** — 🅐 inject | 🅑 logic | 🅒 converge and a
+dashboard pane (coverage bar, findings by status/class, latest hits, elapsed time). Detach
+with `Ctrl-b` then `d` (sessions keep running); re-attach with `tmux attach -t taintforge`.
+Stop everything: `kill $(cat workspace/_pids); tmux kill-session -t taintforge`. If tmux
+isn't installed, `start.sh` falls back to a plain headless run.
+
+Headless / no-tmux (logs go to `workspace/_log_{A,B,C}.txt`):
+```bash
+./audit.sh -u http://localhost:8080 targets/<app>
 ./audit.sh --url http://host --accounts creds.json targets/<app>
 ```
 
@@ -173,7 +186,9 @@ CODEX_CMD="codex exec --sandbox workspace-write --model gpt-5.5" ./audit.sh -u h
 To run longer or continue, re-run `./audit.sh` — state in `workspace/` persists, so the
 agents pick up and dig deeper. Ctrl-C stops all three sessions.
 
-### Watch progress (separate shell)
+### Watch progress
+
+With `start.sh` the dashboard pane shows this live. Headless? In a separate shell:
 
 ```bash
 tail -f workspace/_log_B.txt                                   # a session's reasoning
