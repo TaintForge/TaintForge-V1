@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """dashboard.py - live status panel for TaintForge (refreshes in place)."""
-import json, os, glob, time, collections, sys
+import json, os, glob, time, collections, sys, subprocess
 
 C = {"reset":"\033[0m","dim":"\033[2m","b":"\033[1m","cyan":"\033[36m","grn":"\033[32m",
      "yel":"\033[33m","red":"\033[31m","mag":"\033[35m","blu":"\033[34m","gry":"\033[90m"}
@@ -20,6 +20,11 @@ def bar(done, total, w=24):
 def main():
     findings_dir="workspace/findings"; cov="workspace/coverage.json"
     while True:
+        # keep report.md always current (not stale) - cheap, runs triage quietly
+        try:
+            subprocess.run(["python3",".agents/skills/convergence/scripts/triage.py"],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=20)
+        except Exception: pass
         fs=[load(p) for p in glob.glob(f"{findings_dir}/*.json")]; fs=[f for f in fs if f]
         st=collections.Counter(f.get("status","candidate") for f in fs)
         cl=collections.Counter(f.get("vuln_class","?") for f in fs)
@@ -31,6 +36,8 @@ def main():
         out.append(f"{C['gry']}  ────────────────────────────────────{C['reset']}")
         out.append(f"  {C['b']}coverage{C['reset']}  {bar(done,len(mods))} {done}/{len(mods)} modules")
         out.append(f"  {C['b']}findings{C['reset']}  {len(fs)} total")
+        novel=[f for f in fs if (f.get("disclosure") or {}).get("status")=="novel"]
+        if novel: out.append(f"  {C['b']}{C['red']}\u26a0 potential 0-day{C['reset']}  {len(novel)} (novel, reproduced)")
         for s in ["confirmed","reproduced","cross_validated","candidate","needs_reanalysis","false_positive"]:
             if st.get(s): out.append(f"      {STT.get(s,'')}{s:<16}{C['reset']} {st[s]}")
         if cl:

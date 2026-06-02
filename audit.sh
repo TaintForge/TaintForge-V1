@@ -54,12 +54,22 @@ session to prove (or disprove) IDOR/authz bugs."
     ACCT_NOTE="No accounts file found at $ACCOUNTS - reproduce only what is reachable
 unauthenticated, and note where authenticated testing is needed."
   fi
+  # out-of-band canary for SSRF/blind confirmation
+  CANARY_PORT="${CANARY_PORT:-9111}"
+  CANARY_HOST="${CANARY_HOST:-127.0.0.1}"
+  python3 "$S/convergence/scripts/canary.py" serve --port "$CANARY_PORT" \
+      --log workspace/_canary.log > workspace/_log_canary.txt 2>&1 &  PCAN=$!
   DYN="A LIVE INSTANCE of the target is running at: $URL
-Use it for dynamic reproduction and to confirm reachability/behavior. Send requests with
-.agents/skills/convergence/scripts/probe.py (e.g. probe.py -X GET \"$URL/<path>\" -H ...).
-$ACCT_NOTE
-Only ever send requests to $URL - never any other host."
-  echo "== live target: $URL  | accounts: $([ -f "$ACCOUNTS" ] && echo "$ACCOUNTS ($N)" || echo none) =="
+Use it for dynamic reproduction. Send requests with
+.agents/skills/convergence/scripts/probe.py (it keeps sessions via --jar FILE; e.g.
+probe.py -X GET \"$URL/<path>\" --jar a.jar). $ACCT_NOTE
+An OUT-OF-BAND CANARY is running at http://$CANARY_HOST:$CANARY_PORT for SSRF/blind bugs:
+make the target fetch http://$CANARY_HOST:$CANARY_PORT/<uniqueToken> (via the vulnerable
+param), then run .agents/skills/convergence/scripts/canary.py check <uniqueToken> - a HIT
+proves SSRF out-of-band. For internal/blind SSRF without a callback, compare responses to
+http://127.0.0.1:<internalport> or http://169.254.169.254/ instead.
+Only send requests to $URL and the canary - never any other host."
+  echo "== live target: $URL  | accounts: $([ -f "$ACCOUNTS" ] && echo "$ACCOUNTS ($N)" || echo none)  | canary: $CANARY_HOST:$CANARY_PORT =="
 else
   DYN="No live instance was provided (no --url). Do static analysis only; when a finding
 needs dynamic proof, set status needs_reanalysis with a note that it requires a running
@@ -130,29 +140,74 @@ candidate/cross_validated findings (highest severity first), then
 1) cross-validate: .agents/skills/convergence/scripts/cross_validate.sh $TARGET (PHP falls
    back to OpenGrep; correlate bumps matches to cross_validated),
 2) reproduce dynamically (only if a live URL is provided) with
-   .agents/skills/convergence/scripts/probe.py - Track A: fire the payload; Track B:
-   authenticate as two accounts from workspace/_accounts.json and replay one user's request
-   with the other's session. Update status reproduced/false_positive/needs_reanalysis via
-   write_finding.py --update <id>,
-3) regenerate workspace/report/report.md with .agents/skills/convergence/scripts/triage.py.
-If the queue is momentarily empty, wait briefly and recheck - producers are still working.
-Keep going until producers stop and the queue is drained. Use the convergence skill.
-$DYN"
+   .agents/skills/convergence/scripts/probe.py. It keeps a SESSION via --jar FILE: log in
+   each account from workspace/_accounts.json into its own jar (find the login route/body
+   from the code yourself), then reuse that jar to hit protected resources. Track A: fire
+   the payload and look for the sink triggering. Track B (IDOR/authz): with account A's jar,
+   request account B's object/action - if A gets B's data it is confirmed; for priv-esc hit
+   an admin action with a low-priv jar. Update status reproduced/false_positive/
+   needs_reanalysis via write_finding.py --update <id>. ALWAYS attach a PoC: record the
+   exact reproducing command(s) in repro.poc (full probe.py/curl line with payload, headers,
+   --jar - copy-pasteable) and the decisive response in repro.response; for IDOR include
+   both identities' requests. If the live test is inconclusive,
+   set needs_reanalysis (not stuck candidate),
+3) for any finding you just moved to reproduced/confirmed, WEB-SEARCH whether it is already
+   public: query the target product+version+vuln specifics against CVE/NVD, vendor and
+   GitHub security advisories, changelogs. Set disclosure{status: novel|known|inconclusive,
+   references:[...], rationale} via write_finding.py --update <id>. novel = no public report
+   (potential 0-day). Only search reproduced/confirmed findings, not raw candidates.
+4) for each reproduced/confirmed finding, WRITE a poc.py that reproduces THAT specific vuln
+   using the requests library, and store its full source in repro.poc_script via
+   write_finding.py --update <id>. Make it fit the actual vuln: if it is pre-auth, no login
+   step; otherwise authenticate as needed; use as many requests as the exploit takes; print
+   a clear PASS/FAIL signal. Do NOT assume a fixed login->exploit shape. Then run
+   .agents/skills/convergence/scripts/emit_poc.py to materialize workspace/report/<id>/
+   (poc.py + finding.md), one folder per vulnerability - never merged.
+5) regenerate the rolling index workspace/report/report.md with .agents/skills/convergence/scripts/triage.py.
+DO NOT EVER STOP ON YOUR OWN. Do not check whether producer processes are alive. Do not
+treat an empty queue as completion. If workspace/findings/ has nothing new, sleep ~30s and
+check again - the producers stream findings continuously and new ones arrive over time.
+Never declare the convergence complete and never exit - run as an infinite loop until a
+human kills you. Each cycle: process any candidate/cross_validated findings, then sleep
+and recheck.
+Use the convergence skill. $DYN"
 
-echo "== launching 3 parallel Codex sessions (A inject | B logic | C converge) =="
-$CODEX_CMD "$MISSION_A" > workspace/_log_A.txt 2>&1 &  PA=$!
-$CODEX_CMD "$MISSION_B" > workspace/_log_B.txt 2>&1 &  PB=$!
-$CODEX_CMD "$MISSION_C" > workspace/_log_C.txt 2>&1 &  PC=$!
-echo "$PA $PB $PC" > workspace/_pids
-echo "  A=$PA (workspace/_log_A.txt)  B=$PB (workspace/_log_B.txt)  C=$PC (workspace/_log_C.txt)"
+echo "== launching 3 parallel Codex sessions (auto-respawn until deadline / stop) =="
+MAX_HOURS="${MAX_HOURS:-12}"
+DEADLINE=$(( $(date +%s) + MAX_HOURS*3600 ))
+rm -f workspace/_stop
 
-# SPAWN_ONLY=1 -> just start the sessions and return (used by start.sh's tmux wrapper).
+# A codex exec session is NOT infinite - it exits when the agent decides it's done or hits
+# a turn/token limit. For a streaming consumer/producer that's fatal (C "completes" and
+# dies while findings are still coming). So each role runs under a supervisor that RESPAWNS
+# it whenever it exits, until MAX_HOURS or workspace/_stop. Logs are appended across restarts.
+supervise(){ # $1=tag $2=logfile $3=mission  -> echoes supervisor pid
+  ( n=0
+    while [ ! -f workspace/_stop ] && [ "$(date +%s)" -lt "$DEADLINE" ]; do
+        n=$((n+1))
+        echo "===== [$(date +%H:%M:%S)] session $1 start #$n =====" >> "$2"
+        $CODEX_CMD "$3" >> "$2" 2>&1 </dev/null
+        echo "===== [$(date +%H:%M:%S)] session $1 exited (#$n); respawn in 5s =====" >> "$2"
+        sleep 5
+    done
+    echo "===== [$(date +%H:%M:%S)] session $1 supervisor stopped =====" >> "$2"
+  ) </dev/null >/dev/null 2>&1 & echo $!
+}
+PA=$(supervise A workspace/_log_A.txt "$MISSION_A")
+PB=$(supervise B workspace/_log_B.txt "$MISSION_B")
+PC=$(supervise C workspace/_log_C.txt "$MISSION_C")
+echo "$PA $PB $PC ${PCAN:-}" > workspace/_pids
+echo "  A=$PA  B=$PB  C=$PC  (supervisors; auto-respawn, ${MAX_HOURS}h budget)"
+
+stop_all(){ touch workspace/_stop; kill $PA $PB $PC ${PCAN:-} 2>/dev/null; pkill -f "codex exec" 2>/dev/null; }
+
+# SPAWN_ONLY=1 -> return immediately (start.sh's tmux wrapper drives the display).
 if [ "${SPAWN_ONLY:-0}" = "1" ]; then
-  echo "  (spawned; pids in workspace/_pids)  stop with: kill \$(cat workspace/_pids)"
+  echo "  (spawned; pids in workspace/_pids)  stop with: touch workspace/_stop; kill \$(cat workspace/_pids); pkill -f 'codex exec'"
   exit 0
 fi
 
 echo "  python3 $S/convergence/scripts/queue.py --counts   # watch the queue"
-trap 'echo; echo "stopping..."; kill $PA $PB $PC 2>/dev/null' INT TERM
-wait
-echo "== all sessions ended -> workspace/report/report.md =="
+trap 'echo; echo "stopping..."; stop_all' INT TERM
+wait $PA $PB $PC
+echo "== run ended (deadline/stop) -> workspace/report/report.md =="

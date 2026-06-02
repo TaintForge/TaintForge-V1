@@ -36,10 +36,14 @@ def score(f):
     return SEV_W.get(f.get("severity_estimate","medium"),3) * CONF.get(f.get("status","candidate"),0.4)
 
 def load(findings_dir):
-    out=[]
+    out=[]; bad=[]
     for p in glob.glob(os.path.join(findings_dir,"*.json")):
+        if p.endswith(".lock"): continue
         try: out.append(json.load(open(p)))
-        except Exception: pass
+        except Exception as e: bad.append((os.path.basename(p),str(e)))
+    if bad:
+        print(f"[triage] WARNING: {len(bad)} unreadable finding file(s) skipped:")
+        for n,e in bad[:10]: print(f"    {n}: {e}")
     return out
 
 def dedup(findings):
@@ -82,14 +86,24 @@ def main():
         if by_status.get(s): L.append(f"- **{s}**: {by_status[s]}")
     L.append("\n## Summary by class\n")
     for c,n in by_class.most_common(): L.append(f"- {c}: {n}")
+    novel=[f for f in ranked if (f.get("disclosure") or {}).get("status")=="novel"
+           and f.get("status") in ("reproduced","confirmed")]
+    if novel:
+        L.append("\n## \u26a0\ufe0f Potential 0-day (reproduced + no public report)\n")
+        for f in novel:
+            sk=f.get("sink",{})
+            L.append(f"- **{f.get('severity_estimate','?')}** {f.get('vuln_class','?')} "
+                     f"at {sk.get('file','?')}:{sk.get('line','?')} - "
+                     f"{(f.get('disclosure') or {}).get('rationale','')}")
     L.append("\n## Ranked findings\n")
-    L.append("| # | sev | status | class | CWE | OWASP | location | dups |")
-    L.append("|---|-----|--------|-------|-----|-------|----------|------|")
+    L.append("| # | sev | status | disclosure | class | CWE | OWASP | location | dups |")
+    L.append("|---|-----|--------|-----------|-------|-----|-------|----------|------|")
     for i,f in enumerate(ranked,1):
         sink=f.get("sink",{})
         loc=f"{sink.get('file','?')}:{sink.get('line','?')}"
         owasp=OWASP.get((f.get('cwe') or '').upper(),"-")
-        L.append(f"| {i} | {f.get('severity_estimate','?')} | {f.get('status','?')} | "
+        disc=(f.get('disclosure') or {}).get('status','-')
+        L.append(f"| {i} | {f.get('severity_estimate','?')} | {f.get('status','?')} | {disc} | "
                  f"{f.get('vuln_class','?')} | {f.get('cwe','-')} | {owasp} | {loc} | "
                  f"{f.get('_dup_count',1)} |")
     L.append("\n## Details\n")
@@ -102,6 +116,10 @@ def main():
         rep=f.get('repro',{})
         if rep.get('attempted'):
             L.append(f"- repro: success={rep.get('success')} | {rep.get('observation','')}")
+        d=f.get('disclosure') or {}
+        if d.get('checked'):
+            refs=", ".join(d.get('references',[]) or [])
+            L.append(f"- disclosure: {d.get('status','?')}{(' ['+refs+']') if refs else ''} - {d.get('rationale','')}")
         L.append("")
     open(args.out,"w").write("\n".join(L))
     print(f"\n[triage] ranked {len(ranked)} -> {args.out}")

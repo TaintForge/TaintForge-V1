@@ -4,7 +4,16 @@
   "title": "Finding",
   "description": "One vulnerability finding. Written append-only as workspace/findings/<id>.json. The `status` flag + `history` are what drive the streaming convergence and the reproduction feedback loop.",
   "type": "object",
-  "required": ["id", "track", "vuln_class", "status", "detector", "source", "sink", "created_at"],
+  "required": [
+    "id",
+    "track",
+    "vuln_class",
+    "status",
+    "detector",
+    "source",
+    "sink",
+    "created_at"
+  ],
   "additionalProperties": false,
   "properties": {
     "id": {
@@ -15,41 +24,89 @@
       "type": "string",
       "description": "Groups findings that share a root cause (e.g. one tainted source reaching many sinks). Used by convergence for de-dup."
     },
-    "track": { "type": "string", "enum": ["A", "B"], "description": "A = data-flow/injection, B = logic/authz." },
+    "track": {
+      "type": "string",
+      "enum": [
+        "A",
+        "B"
+      ],
+      "description": "A = data-flow/injection, B = logic/authz."
+    },
     "vuln_class": {
       "type": "string",
       "description": "e.g. sql-injection, command-injection, xss, deserialization, idor, broken-access-control, auth-bypass, business-logic."
     },
-    "cwe": { "type": "string", "description": "e.g. CWE-89. Pulled from Semgrep rule metadata when available." },
-    "title": { "type": "string" },
+    "cwe": {
+      "type": "string",
+      "description": "e.g. CWE-89. Pulled from Semgrep rule metadata when available."
+    },
+    "title": {
+      "type": "string"
+    },
     "severity_estimate": {
       "type": "string",
-      "enum": ["info", "low", "medium", "high", "critical"],
+      "enum": [
+        "info",
+        "low",
+        "medium",
+        "high",
+        "critical"
+      ],
       "description": "Producer's first guess. Triage may revise after reproduction."
     },
     "detector": {
       "type": "string",
-      "enum": ["semgrep", "opengrep", "codeql", "llm-track-a", "llm-track-b"],
+      "enum": [
+        "semgrep",
+        "opengrep",
+        "codeql",
+        "llm-track-a",
+        "llm-track-b"
+      ],
       "description": "What produced/confirmed this finding."
     },
     "source": {
       "type": "object",
-      "required": ["file", "line"],
+      "required": [
+        "file",
+        "line"
+      ],
       "properties": {
-        "file": { "type": "string" },
-        "line": { "type": "integer" },
-        "symbol": { "type": "string" },
-        "description": { "type": "string", "description": "What makes this attacker-controlled (e.g. GET param)." }
+        "file": {
+          "type": "string"
+        },
+        "line": {
+          "type": "integer"
+        },
+        "symbol": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string",
+          "description": "What makes this attacker-controlled (e.g. GET param)."
+        }
       }
     },
     "sink": {
       "type": "object",
-      "required": ["file", "line"],
+      "required": [
+        "file",
+        "line"
+      ],
       "properties": {
-        "file": { "type": "string" },
-        "line": { "type": "integer" },
-        "symbol": { "type": "string" },
-        "description": { "type": "string", "description": "Why this is dangerous (e.g. cursor.execute)." }
+        "file": {
+          "type": "string"
+        },
+        "line": {
+          "type": "integer"
+        },
+        "symbol": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string",
+          "description": "Why this is dangerous (e.g. cursor.execute)."
+        }
       }
     },
     "flow": {
@@ -57,34 +114,79 @@
       "description": "Ordered source->sink path. Each hop is a step the taint/reasoning crossed.",
       "items": {
         "type": "object",
-        "required": ["file", "line"],
+        "required": [
+          "file",
+          "line"
+        ],
         "properties": {
-          "file": { "type": "string" },
-          "line": { "type": "integer" },
-          "note": { "type": "string" }
+          "file": {
+            "type": "string"
+          },
+          "line": {
+            "type": "integer"
+          },
+          "note": {
+            "type": "string"
+          }
         }
       }
     },
     "sanitizers_seen": {
       "type": "array",
-      "items": { "type": "string" },
+      "items": {
+        "type": "string"
+      },
       "description": "Validation/escaping encountered on the path. Empty = no sanitization."
     },
-    "evidence": { "type": "string", "description": "LLM reasoning for why this is (or isn't) exploitable." },
+    "evidence": {
+      "type": "string",
+      "description": "LLM reasoning for why this is (or isn't) exploitable."
+    },
     "status": {
       "type": "string",
-      "enum": ["candidate", "cross_validated", "needs_reanalysis", "reproduced", "false_positive", "confirmed"],
+      "enum": [
+        "candidate",
+        "cross_validated",
+        "needs_reanalysis",
+        "reproduced",
+        "false_positive",
+        "confirmed"
+      ],
       "description": "Lifecycle. candidate -> cross_validated -> reproduced -> confirmed. Repro failure can route to false_positive OR needs_reanalysis (feedback loop)."
     },
     "repro": {
       "type": "object",
       "description": "Filled by convergence reproduction step.",
       "properties": {
-        "attempted": { "type": "boolean" },
-        "success": { "type": ["boolean", "null"] },
-        "poc": { "type": "string", "description": "Payload / request used." },
-        "observation": { "type": "string", "description": "What was observed when fired." },
-        "env": { "type": "string", "description": "Which warm target env was used." }
+        "attempted": {
+          "type": "boolean"
+        },
+        "success": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "poc": {
+          "type": "string",
+          "description": "The EXACT reproducing request(s) - the full probe.py/curl command(s) incl. method, URL, headers, cookies/jar, and payload, so a human can copy-paste and re-run it. For IDOR include both identities' requests."
+        },
+        "observation": {
+          "type": "string",
+          "description": "What was observed when fired."
+        },
+        "env": {
+          "type": "string",
+          "description": "Which warm target env was used."
+        },
+        "response": {
+          "type": "string",
+          "description": "Key evidence from the live response that proves the bug (status, decisive snippet, timing, canary HIT)."
+        },
+        "poc_script": {
+          "type": "string",
+          "description": "Full, self-contained Python source of a poc.py that reproduces THIS vuln when run (uses requests). The agent writes it to fit the actual vuln: pre-auth needs no login; multi-step flows have as many requests as needed. Saved verbatim to report/<id>/poc.py."
+        }
       }
     },
     "history": {
@@ -92,15 +194,68 @@
       "description": "Audit trail. Every stage that touches this finding appends an entry. Makes the feedback loop debuggable.",
       "items": {
         "type": "object",
-        "required": ["stage", "action", "ts"],
+        "required": [
+          "stage",
+          "action",
+          "ts"
+        ],
         "properties": {
-          "stage": { "type": "string", "enum": ["track-a", "track-b", "cross-validation", "reproduction", "triage"] },
-          "action": { "type": "string" },
-          "ts": { "type": "string", "format": "date-time" }
+          "stage": {
+            "type": "string",
+            "enum": [
+              "track-a",
+              "track-b",
+              "cross-validation",
+              "reproduction",
+              "triage"
+            ]
+          },
+          "action": {
+            "type": "string"
+          },
+          "ts": {
+            "type": "string",
+            "format": "date-time"
+          }
         }
       }
     },
-    "created_at": { "type": "string", "format": "date-time" },
-    "updated_at": { "type": "string", "format": "date-time" }
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "updated_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "disclosure": {
+      "type": "object",
+      "description": "Set by convergence AFTER reproduction: is this already public (known CVE/advisory) or novel?",
+      "properties": {
+        "checked": {
+          "type": "boolean"
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "novel",
+            "known",
+            "inconclusive"
+          ],
+          "description": "novel = no public report found; known = matches a published CVE/advisory; inconclusive = unsure"
+        },
+        "references": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "CVE ids / advisory URLs found via web search"
+        },
+        "rationale": {
+          "type": "string",
+          "description": "why classified novel/known (what the search showed)"
+        }
+      }
+    }
   }
 }
