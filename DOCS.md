@@ -27,6 +27,127 @@ cross-checks.
 
 ---
 
+## 1.5 Why it's split this way — boundaries & synchronization
+
+This is the "why" behind the architecture: why the work is cut into these specific pieces,
+and how independent processes stay consistent without stepping on each other. Read this if
+you're modifying the design, not just running it.
+
+### 1.5.1 Why split the work at all (separation of concerns)
+
+**Seed (no-LLM) vs hunt (LLM).** The call graph, module list, and built-in-sink edges are
+*deterministic* — there's no judgment in parsing PHP into a call graph. So that work is done
+*once*, cheaply, by tree-sitter, and written to `CODE_MODEL.json` for everyone to read. If
+each session re-derived structure, you'd pay LLM tokens (and wall-clock) three times to
+recompute the same facts, and the three copies could disagree. Deterministic facts → build
+once, share; judgment → spend the model on that.
+
+**Finder vs verifier (producer/consumer).** Finding and proving are *different jobs with
+different cost profiles*. Finding is breadth-first and cheap-ish (read code, reason, record a
+candidate). Verifying is depth-first and expensive (spin up live requests, log in, replay,
+fire payloads, web-search CVEs, write a PoC). If one session did both, every expensive
+reproduction would *block* the next module from being scanned. Splitting them lets A/B keep
+sweeping the codebase while C grinds on reproduction in parallel — and it gives reproduction
+its own focused prompt instead of being an afterthought the finder rushes through.
+
+**A vs B (injection vs logic).** These need *opposite* methods and *different seeds*, so one
+prompt doing both does neither well:
+- **A (injection/data-flow)** is *sink-first*: start at a dangerous primitive, walk the call
+  graph **backward** to a source, judge sanitizers. Tools (OpenGrep) can assist because the
+  patterns are syntactic. Seed: the `structural` call graph + SAST leads.
+- **B (logic/access-control)** is *entry-first*: start at a route, walk **forward** to a
+  resource load, and ask whether an authz/ownership gate exists on the path. Tools are nearly
+  blind here — "missing ownership check" isn't a grep pattern; it needs application
+  comprehension. Seed: the `comprehension` layer + `_authz_matrix.json`.
+A single combined agent reliably over-invests in the easy, tool-shaped injection bugs and
+skimps on the logic bugs that actually need reasoning. Two roles, two seeds, two mindsets.
+
+### 1.5.2 Why parallel + streaming (not a sequence)
+
+Producers are **breadth-bound** (dozens of modules to cover); the consumer is **depth-bound**
+(seconds-to-minutes of live work per finding). Running C only *after* A/B finish would idle
+the live-reproduction machinery for the entire scan, then serialize all reproductions at the
+end — hours wasted. Streaming overlaps them: C reproduces finding #1 while A/B are still
+discovering #20. It also makes the **feedback loop** real — C can flip a finding to
+`needs_reanalysis` and the producers, still alive, can revisit it. A batch pipeline couldn't
+do that without another full pass.
+
+### 1.5.3 How three processes stay in sync (the hard part)
+
+The three sessions are **separate OS processes** (separate `codex exec` invocations). They
+share no memory. So coordination has to go through something all three — and the supervising
+shell, and any human watching — can see and that *survives a respawn*. That something is the
+**filesystem** (`workspace/`). No database, no message broker, no socket: those add infra,
+and (for an in-memory queue) would die when a session ends. The filesystem is durable, zero
+-setup, and inspectable with `ls`/`cat`.
+
+**The queue *is* a directory.** `workspace/findings/` with one JSON file per finding. A file's
+*existence* means "queued"; its `status` field means "where in the lifecycle". Producers add
+files; the consumer scans the directory and rewrites files in place. There is no separate
+queue server — the directory listing is the queue state, which is why `queue.py` is just a
+`glob` + counter.
+
+**Identity / dedup is content-addressed.** `write_finding.py` computes
+`id = sha1(track | vuln_class | sink.file | sink.line)[:16]`. Two passes (or two producers)
+that land on the **same sink for the same bug class** produce the **same id**, hence the same
+filename — so a re-discovery *collapses onto the existing file* instead of creating a
+duplicate. Writes are therefore **idempotent on identity**. This is the synchronization that
+lets A and B (and repeated passes of each) run freely without double-counting.
+
+**Concurrency safety is a per-finding lock.** Before touching `<id>.json`, the writer takes an
+exclusive `fcntl.flock` on `<id>.json.lock`. Two processes writing the *same* finding
+serialize; they never interleave a half-written JSON. Combined with content-addressed ids,
+the contention window is tiny (only collisions on the exact same finding lock at all).
+
+**Writes are append-only on history, merge-on-update.** If a finding already exists and this
+isn't an explicit update, the writer *keeps the original* and only appends a `history` entry
+("re-seen") — it never clobbers another session's data. With `--update <id>` it *merges* new
+fields onto the existing object and preserves the full `history`. So the file accumulates
+truth from multiple sessions instead of the last writer winning blindly. The `history` array
+is the audit trail of who-touched-what-when across all three sessions.
+
+**`status` is the hand-off signal.** The lifecycle field is a tiny state machine living on
+disk, and it's how producer and consumer coordinate *without talking directly*:
+`candidate` (producer is done, consumer take it) → `cross_validated` → `reproduced` →
+`confirmed`; or `needs_reanalysis` (consumer hands it back) / `false_positive` (drop). C polls
+for non-terminal statuses; producers watch for `needs_reanalysis`. The shared field replaces
+any need for inter-process messaging.
+
+**Derived state is regenerated, never trusted stale.** `report.md` and `report/<id>/` are
+*derived* from `findings/`. Rather than trying to keep them in sync incrementally (and
+risking drift — exactly the "findings exist but report says 0" bug), the dashboard simply
+**re-derives them every cycle** from the source of truth. Source of truth = `findings/`;
+everything else is a pure function of it, recomputed.
+
+### 1.5.4 How the *lifecycles* stay in sync (supervisors + `_stop`)
+
+Sessions are finite and independent, so nothing inherently keeps all three *running together*
+for the duration. The coordination primitive is again the filesystem: each role runs in a
+shell `supervise()` loop that respawns the session on exit **until** either a deadline
+(`MAX_HOURS`) or the presence of `workspace/_stop`. `_stop` is a shared kill-switch every
+supervisor polls — `touch workspace/_stop` is how you stop *all* of them at once (and why you
+must create it *before* killing PIDs, or a supervisor respawns what you just killed). The
+supervisor PIDs are recorded in `workspace/_pids` as the stop handle.
+
+### 1.5.5 How the design got here (refactors, and why each happened)
+
+Each of these was a real failure that forced a boundary change:
+
+| from | to | why |
+|---|---|---|
+| sequential pipeline | parallel streaming A/B/C | overlap breadth (find) with depth (reproduce); enable live feedback |
+| shell loop re-invoking codex per module | one long self-driving session per role | the per-module loop reset the agent's memory every iteration |
+| tools author findings (semgrep→finding) | **agent** authors; tools only hint | semgrep-driven runs produced 0 findings (PHP not in rules); judgment was missing |
+| Semgrep OSS | OpenGrep | Semgrep OSS core segfaults on large repos (ConcreteCMS) |
+| stateless `probe.py` (one request) | session-aware `--jar` cookie jar | auth'd reproduction (login → protected resource, IDOR replay) was impossible without persistent sessions |
+| C decides when it's done | supervisor respawn + "never stop on your own" | C saw an empty queue at startup and exited before producers had written anything |
+| one merged `report.md` | per-vuln `report/<id>/{poc.py,finding.md}` | a fixed 2-step PoC template was wrong (pre-auth vs multi-step differ); the agent should author a PoC per bug |
+| backgrounded supervisors inherit shell fds | detach fds (`</dev/null >…`) + `setsid`-style | inherited fds kept the parent shell open, so `start.sh` hung at "launching…" and never reached tmux |
+| `tiled` + index-based pane labels | labels bound to captured pane **ids** | the tiled layout renumbered panes, scrambling which label sat on which pane |
+
+The throughline: **push determinism into tools done once, push judgment into focused agents,
+and let independent processes coordinate only through durable, content-addressed files.**
+
 ## 2. The finding contract (`schemas/finding.schema.json`)
 
 Everything flows through this one object. Key fields:
