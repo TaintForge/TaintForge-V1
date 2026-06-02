@@ -1,0 +1,106 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "secaudit/finding.schema.json",
+  "title": "Finding",
+  "description": "One vulnerability finding. Written append-only as workspace/findings/<id>.json. The `status` flag + `history` are what drive the streaming convergence and the reproduction feedback loop.",
+  "type": "object",
+  "required": ["id", "track", "vuln_class", "status", "detector", "source", "sink", "created_at"],
+  "additionalProperties": false,
+  "properties": {
+    "id": {
+      "type": "string",
+      "description": "Stable id, e.g. sha1(track + vuln_class + sink.file + sink.line). Same logical bug must hash to the same id so re-runs do not duplicate."
+    },
+    "correlation_id": {
+      "type": "string",
+      "description": "Groups findings that share a root cause (e.g. one tainted source reaching many sinks). Used by convergence for de-dup."
+    },
+    "track": { "type": "string", "enum": ["A", "B"], "description": "A = data-flow/injection, B = logic/authz." },
+    "vuln_class": {
+      "type": "string",
+      "description": "e.g. sql-injection, command-injection, xss, deserialization, idor, broken-access-control, auth-bypass, business-logic."
+    },
+    "cwe": { "type": "string", "description": "e.g. CWE-89. Pulled from Semgrep rule metadata when available." },
+    "title": { "type": "string" },
+    "severity_estimate": {
+      "type": "string",
+      "enum": ["info", "low", "medium", "high", "critical"],
+      "description": "Producer's first guess. Triage may revise after reproduction."
+    },
+    "detector": {
+      "type": "string",
+      "enum": ["semgrep", "opengrep", "codeql", "llm-track-a", "llm-track-b"],
+      "description": "What produced/confirmed this finding."
+    },
+    "source": {
+      "type": "object",
+      "required": ["file", "line"],
+      "properties": {
+        "file": { "type": "string" },
+        "line": { "type": "integer" },
+        "symbol": { "type": "string" },
+        "description": { "type": "string", "description": "What makes this attacker-controlled (e.g. GET param)." }
+      }
+    },
+    "sink": {
+      "type": "object",
+      "required": ["file", "line"],
+      "properties": {
+        "file": { "type": "string" },
+        "line": { "type": "integer" },
+        "symbol": { "type": "string" },
+        "description": { "type": "string", "description": "Why this is dangerous (e.g. cursor.execute)." }
+      }
+    },
+    "flow": {
+      "type": "array",
+      "description": "Ordered source->sink path. Each hop is a step the taint/reasoning crossed.",
+      "items": {
+        "type": "object",
+        "required": ["file", "line"],
+        "properties": {
+          "file": { "type": "string" },
+          "line": { "type": "integer" },
+          "note": { "type": "string" }
+        }
+      }
+    },
+    "sanitizers_seen": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Validation/escaping encountered on the path. Empty = no sanitization."
+    },
+    "evidence": { "type": "string", "description": "LLM reasoning for why this is (or isn't) exploitable." },
+    "status": {
+      "type": "string",
+      "enum": ["candidate", "cross_validated", "needs_reanalysis", "reproduced", "false_positive", "confirmed"],
+      "description": "Lifecycle. candidate -> cross_validated -> reproduced -> confirmed. Repro failure can route to false_positive OR needs_reanalysis (feedback loop)."
+    },
+    "repro": {
+      "type": "object",
+      "description": "Filled by convergence reproduction step.",
+      "properties": {
+        "attempted": { "type": "boolean" },
+        "success": { "type": ["boolean", "null"] },
+        "poc": { "type": "string", "description": "Payload / request used." },
+        "observation": { "type": "string", "description": "What was observed when fired." },
+        "env": { "type": "string", "description": "Which warm target env was used." }
+      }
+    },
+    "history": {
+      "type": "array",
+      "description": "Audit trail. Every stage that touches this finding appends an entry. Makes the feedback loop debuggable.",
+      "items": {
+        "type": "object",
+        "required": ["stage", "action", "ts"],
+        "properties": {
+          "stage": { "type": "string", "enum": ["track-a", "track-b", "cross-validation", "reproduction", "triage"] },
+          "action": { "type": "string" },
+          "ts": { "type": "string", "format": "date-time" }
+        }
+      }
+    },
+    "created_at": { "type": "string", "format": "date-time" },
+    "updated_at": { "type": "string", "format": "date-time" }
+  }
+}

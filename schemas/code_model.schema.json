@@ -1,0 +1,125 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "secaudit/code_model.schema.json",
+  "title": "CodeModel",
+  "description": "Built ONCE by the source-model stage, consumed by everything downstream. Two layers: `structural` (tool-driven facts) and `comprehension` (LLM-driven meaning). Track A consumes mainly structural; Track B consumes mainly comprehension.",
+  "type": "object",
+  "required": ["target", "structural", "comprehension", "generated_at"],
+  "additionalProperties": false,
+  "properties": {
+    "target": {
+      "type": "object",
+      "required": ["name", "languages", "root"],
+      "properties": {
+        "name": { "type": "string" },
+        "languages": { "type": "array", "items": { "type": "string" } },
+        "root": { "type": "string", "description": "Path under targets/." },
+        "commit": { "type": "string" }
+      }
+    },
+    "structural": {
+      "type": "object",
+      "description": "Tool-driven (tree-sitter for AST/symbols; semgrep/codeql can enrich). Deterministic facts.",
+      "properties": {
+        "files": { "type": "array", "items": { "type": "string" } },
+        "entry_points": {
+          "type": "array",
+          "description": "Where external input enters. Seeded from routes/handlers/CLI.",
+          "items": {
+            "type": "object",
+            "properties": {
+              "kind": { "type": "string", "description": "http-route | cli | message-queue | webhook ..." },
+              "method": { "type": "string" },
+              "path": { "type": "string" },
+              "handler": { "type": "string" },
+              "file": { "type": "string" },
+              "line": { "type": "integer" }
+            }
+          }
+        },
+        "call_graph": {
+          "type": "array",
+          "description": "Directed edges caller -> callee.",
+          "items": {
+            "type": "object",
+            "properties": { "from": { "type": "string" }, "to": { "type": "string" } }
+          }
+        },
+        "symbols_ref": { "type": "string", "description": "Pointer/path to the symbol+def-use table (kept out-of-band if large)." },
+        "cfg_ref": { "type": "string", "description": "Pointer to CFG artifact." },
+        "dataflow_ref": { "type": "string", "description": "Pointer to data-flow / SSA skeleton artifact." }
+      }
+    },
+    "comprehension": {
+      "type": "object",
+      "description": "LLM-driven meaning layer. This is what makes Track B (logic bugs) possible.",
+      "properties": {
+        "service_identity": {
+          "type": "object",
+          "properties": {
+            "domain": { "type": "string", "description": "fintech | ecommerce | saas ..." },
+            "purpose": { "type": "string" },
+            "sensitive_data": { "type": "array", "items": { "type": "string" } }
+          }
+        },
+        "route_map": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "method": { "type": "string" },
+              "path": { "type": "string" },
+              "handler": { "type": "string" },
+              "auth_required": { "type": "boolean" },
+              "role_required": { "type": "string" }
+            }
+          }
+        },
+        "feature_flows": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": { "type": "string" },
+              "steps": { "type": "array", "items": { "type": "string" }, "description": "controller -> service -> repo -> db" }
+            }
+          }
+        },
+        "permission_model": {
+          "type": "object",
+          "properties": {
+            "roles": { "type": "array", "items": { "type": "string" } },
+            "auth_mechanism": { "type": "string", "description": "session | jwt | oauth ..." },
+            "authz_locations": {
+              "type": "array",
+              "description": "Where access checks actually live in code. Track B compares this against expected.",
+              "items": { "type": "object", "properties": { "file": { "type": "string" }, "line": { "type": "integer" }, "check": { "type": "string" } } }
+            }
+          }
+        },
+        "user_journeys": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": { "type": "string" },
+              "steps": { "type": "array", "items": { "type": "string" } },
+              "state": { "type": "string", "description": "What state persists across steps (cart, session, wizard step)." }
+            }
+          }
+        },
+        "trust_boundaries": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "boundary": { "type": "string" },
+              "attacker_controlled_inputs": { "type": "array", "items": { "type": "string" } }
+            }
+          }
+        }
+      }
+    },
+    "generated_at": { "type": "string", "format": "date-time" }
+  }
+}
