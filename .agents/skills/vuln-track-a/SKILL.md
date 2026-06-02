@@ -36,6 +36,17 @@ Using `CODE_MODEL.structural` (entry points, call graph) and `comprehension`
   Follow value transformations across functions/files (the tool can't; you can).
 - Cover sinks/sources the tool never flagged - that's where the tool's blind spots are.
 
+## 2b. Trace the flow across files (use the call graph)
+
+Vulns live on flows, not single lines. For each sink, find its callers and walk back to a
+source across file/module boundaries:
+```bash
+python3 .agents/skills/source-model/scripts/callgraph.py --callers <sink>   # query, unserialize, include, system, eval, mysqli_query, ...
+python3 .agents/skills/source-model/scripts/callgraph.py --trace   <sink>
+```
+The graph is coarse and misses construct sinks on raw input (include $_GET[...], eval of a
+request value) - catch those by reading code. Never judge a sink safe from its own file alone.
+
 ## 3. Judge each candidate (A3 + A4)
 
 - Is there a real path from attacker-controlled input to the sink? If not, drop it.
@@ -56,7 +67,7 @@ echo '{"track":"A","vuln_class":"sql-injection","cwe":"CWE-89",
 "flow":[{"file":"...","line":0,"note":"how taint reaches the sink"}],
 "sanitizers_seen":[],"evidence":"why this is exploitable",
 "_action":"found by reading code (A2-A4)"}' \
-| .agents/skills/vuln-track-b/scripts/write_finding.py
+| .agents/skills/_shared/write_finding.py
 ```
 
 ## Exhaustiveness - do NOT stop after a shallow pass

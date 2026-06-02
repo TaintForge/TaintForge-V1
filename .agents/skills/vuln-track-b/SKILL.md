@@ -62,8 +62,24 @@ echo '{"track":"B","vuln_class":"idor","cwe":"CWE-639",
 "sink":{"file":"...","line":0,"description":"object load without ownership check"},
 "evidence":"why a different user can access it",
 "_action":"confirmed via handler read (B2)"}' \
-| .agents/skills/vuln-track-b/scripts/write_finding.py
+| .agents/skills/_shared/write_finding.py
 ```
+
+## Trace entry -> resource across files (use the call graph)
+
+Access-control bugs are about a MISSING GATE somewhere on the path from a route to a
+resource access, not a single line. For each route/action:
+```bash
+python3 .agents/skills/source-model/scripts/callgraph.py --callees <handlerFile>   # what the handler calls
+python3 .agents/skills/source-model/scripts/callgraph.py --callers <load/findById/getByID>  # who can reach a resource load
+```
+Walk handler -> service -> repository/object-load and check the WHOLE chain for:
+- authentication (is the user logged in?),
+- authorization (role/permission check for this action?),
+- object ownership / tenant scoping (does the loaded id belong to the caller?).
+A resource load reachable from a route with no ownership check on the path = IDOR/BOLA.
+A state-changing action with no role check = broken access control. Don't judge from the
+handler file alone - follow the calls.
 
 ## Exhaustiveness - do NOT stop after a shallow pass
 

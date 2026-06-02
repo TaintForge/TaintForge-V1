@@ -109,10 +109,12 @@ def ts_extract(get_parser, lang, src_bytes):
     return funcs, calls
 
 _KEYWORDS = {"if","for","while","switch","catch","function","echo","print","return",
-             "array","list","isset","empty","unset","new","clone","require","include",
-             "require_once","include_once","and","or","not","foreach","elseif","else",
-             "do","try","throw","match","fn","use","class","interface","trait","global",
-             "static","public","private","protected","const","var","int","string","bool"}
+             "array","list","isset","empty","unset","new","clone","and","or","not",
+             "foreach","elseif","else","do","try","throw","match","fn","use","class",
+             "interface","trait","global","static","public","private","protected",
+             "const","var","int","string","bool"}
+# language-construct / high-risk sinks that aren't normal `name(` calls - captured specially
+_CONSTRUCT_SINKS = ("include","include_once","require","require_once","eval")
 
 def regex_extract(text):
     funcs = [{"name": m.group(1), "line": text[:m.start()].count("\n")+1}
@@ -123,6 +125,9 @@ def regex_extract(text):
         name = m.group(1)
         if name and name not in _KEYWORDS:
             calls.append(name)
+    # include/require/eval are language constructs (often no parens) - capture as sink edges
+    for m in re.finditer(r'\b(include|include_once|require|require_once|eval)\b\s*[\(\'"$]', text):
+        calls.append(m.group(1))
     return funcs, calls
 
 def find_entry_points(rel, text):
@@ -178,15 +183,34 @@ def main():
                 pending_calls.append((rel, short))
         entry_points.extend(find_entry_points(rel, text))
 
-    # coarse call graph: resolve callee name to a known function's defining file
+    # known dangerous sinks (built-ins): record their call sites even though they don't
+    # resolve to a user-defined function, so backward taint can find every call site.
+    SINKS = {
+        # SQL / query
+        "query","exec","mysqli_query","mysql_query","pg_query","prepare","rawQuery",
+        # command
+        "system","shell_exec","passthru","proc_open","popen","pcntl_exec",
+        # code / eval / deserialize
+        "eval","assert","create_function","unserialize","call_user_func","call_user_func_array",
+        # file / inclusion
+        "include","include_once","require","require_once","file_get_contents","fopen",
+        "readfile","file_put_contents","fwrite","move_uploaded_file",
+        # SSRF / net
+        "curl_exec","fsockopen","get_headers",
+    }
+    # coarse call graph: resolve callee name to a known function's defining file.
     seen, call_graph = set(), []
     for caller, callee in pending_calls:
         to_file = func_index.get(callee)
         if to_file and to_file != caller:            # cross-file edge to a known function
             edge = (caller, callee, to_file)
-            if edge not in seen:
-                seen.add(edge)
-                call_graph.append({"from": caller, "callee": callee, "to": to_file})
+        elif callee in SINKS:                         # dangerous built-in call site
+            edge = (caller, callee, "<builtin-sink>")
+        else:
+            continue
+        if edge not in seen:
+            seen.add(edge)
+            call_graph.append({"from": edge[0], "callee": edge[1], "to": edge[2]})
 
     model = {
         "target": {

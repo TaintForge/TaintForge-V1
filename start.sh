@@ -78,9 +78,25 @@ $DYN"
 
 MISSION_A="You are PRODUCER A of a white-box security assessment. Focus ONLY on
 INJECTION / DATA-FLOW vulnerabilities: SQL injection, command/code injection, XSS, SSRF,
-path traversal, file inclusion, deserialization, XXE, SSTI, NoSQL, open redirect. Read
-real code, enumerate sinks, trace backward to attacker-controlled sources, judge
-sanitizers/exploitability. Use the vuln-track-a skill. Optionally pull leads with
+path traversal, file inclusion, deserialization, XXE, SSTI, NoSQL, open redirect.
+
+VULNERABILITIES LIVE ON FLOWS ACROSS FILES, not in one line. Work sink-first and trace
+backward across function/file/module boundaries - a call that looks safe in one file is
+often fed tainted input three calls away. Use the call graph in
+workspace/CODE_MODEL.json (structural.call_graph) via the helper:
+  python3 .agents/skills/source-model/scripts/callgraph.py --stats
+  python3 .agents/skills/source-model/scripts/callgraph.py --callers <sinkOrFunc>   # who calls it
+  python3 .agents/skills/source-model/scripts/callgraph.py --trace   <sinkOrFunc>   # backward paths
+For each dangerous sink (query/exec/system/unserialize/include/eval/file_get_contents/...)
+list its callers, follow the chain back until you reach attacker-controlled input
+(\$_GET/\$_POST/headers/route vars), and judge sanitizers along the WHOLE path. Do NOT mark
+a sink safe by looking at its file alone - check the callers.
+
+The call graph is coarse and cannot see language-construct sinks used directly on input
+(e.g. include \$_GET['p'], echo \$input, eval of a request value). Find those by READING the
+code too; the graph is a starting map, not the whole territory.
+
+Use the vuln-track-a skill. Optionally pull leads with
 .agents/skills/vuln-track-a/scripts/run_semgrep.sh $TARGET (hints only). When a live URL is
 available, confirm reachability/exploitability against it. Record findings with track=\"A\".
 $COMMON"
@@ -88,13 +104,25 @@ $COMMON"
 MISSION_B="You are PRODUCER B of a white-box security assessment. Focus ONLY on LOGIC /
 ACCESS-CONTROL vulnerabilities that data-flow tools miss: IDOR/BOLA, missing authorization,
 privilege escalation, authentication/session bypass, and business-logic flaws
-(step-skipping, price/quantity tampering, mass assignment, race conditions). For EVERY
-route/action ask: who can reach this, is there an authz check, is object ownership
-verified. Use the vuln-track-b skill and workspace/_authz_matrix.json as a seed (build it
-with .agents/skills/vuln-track-b/scripts/build_authz_matrix.py). When a live URL and
-accounts are available, prove access-control bugs by replaying requests across two
-accounts. Record findings with track=\"B\"; if neither code nor a live test can confirm,
-set status needs_reanalysis with reasoning. $COMMON"
+(step-skipping, price/quantity tampering, mass assignment, race conditions).
+
+ACCESS-CONTROL BUGS LIVE ON THE PATH FROM AN ENTRY POINT TO A RESOURCE ACCESS. Trace that
+path and check whether an authorization GATE exists ANYWHERE on it. Use the call graph in
+workspace/CODE_MODEL.json via:
+  python3 .agents/skills/source-model/scripts/callgraph.py --callees <handlerFile>  # what a route handler calls
+  python3 .agents/skills/source-model/scripts/callgraph.py --callers <loaderOrFindFn>  # who reaches a resource load
+For each route/action in workspace/_authz_matrix.json and CODE_MODEL comprehension.route_map:
+follow handler -> service -> repository/object-load, and ask along the WHOLE chain: is there
+an authn check, a role/permission check, and an OWNERSHIP/tenant check on the requested
+object id? If a findById/load/getByID is reachable from a route with NO ownership check on
+the path, that is IDOR. Missing role check on a state-changing action is broken authz.
+Don't judge from the handler file alone - follow the calls.
+
+Use the vuln-track-b skill and workspace/_authz_matrix.json as a seed (build it with
+.agents/skills/vuln-track-b/scripts/build_authz_matrix.py). When a live URL and accounts are
+available, PROVE access-control bugs by replaying one account's request with another
+account's session. Record findings with track=\"B\"; if neither code nor a live test can
+confirm, set status needs_reanalysis with reasoning. $COMMON"
 
 MISSION_C="You are the CONSUMER (convergence). Producers A and B run in PARALLEL and stream
 findings into workspace/findings/. Do NOT wait for them. Loop continuously: pick

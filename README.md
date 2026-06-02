@@ -78,7 +78,7 @@ taintforge/                         ← repo root (run from here)
     finding.schema.json             ← contract: one finding (drives convergence)
   .agents/skills/                   ← Codex discovers skills here
     _shared/        write_finding.py (file-locked finding writer, used by A, B and C)
-    source-model/   build the Code Model (structural + comprehension); coverage.py
+    source-model/   build the Code Model (structural + comprehension); coverage.py, callgraph.py
     vuln-track-a/   injection/data-flow finder; run_semgrep.sh leads, rules/
     vuln-track-b/   logic/access-control finder; build_authz_matrix.py
     convergence/    cross_validate.sh, correlate.py, probe.py, triage.py, queue.py
@@ -95,13 +95,31 @@ taintforge/                         ← repo root (run from here)
 ## The Code Model
 
 `source-model` builds `workspace/CODE_MODEL.json` once, reused by everything:
-- **`structural`** (tool, tree-sitter): files, entry points, call graph.
+- **`structural`** (tool, tree-sitter + regex backstop): files, entry points, and a
+  **call graph** (`caller -> callee` edges, including call sites of dangerous built-ins like
+  `query`/`exec`/`system`/`unserialize`/`include`/`require`/`eval`/`file_get_contents`
+  tagged `<builtin-sink>`). This is what lets the agents follow flows ACROSS files.
 - **`comprehension`** (Codex): `service_identity`, `route_map`, `feature_flows`,
   `permission_model`, `user_journeys`, `trust_boundaries` — the understanding that logic-bug
   hunting (Track B) depends on.
 
 `coverage.py` splits a large codebase into **modules** (vendor/tests excluded; big dirs
 split) so the agents cover everything in bounded chunks rather than skimming once.
+
+Vulnerabilities live on **flows across files**, not single lines. The call graph is the map
+both vuln tracks use to follow them, queried with `callgraph.py`:
+```bash
+python3 .agents/skills/source-model/scripts/callgraph.py --stats            # edge/sink counts
+python3 .agents/skills/source-model/scripts/callgraph.py --callers <sink>   # who calls query/unserialize/include/...
+python3 .agents/skills/source-model/scripts/callgraph.py --callees <file>   # what a handler calls
+python3 .agents/skills/source-model/scripts/callgraph.py --trace   <sink>   # backward paths into a sink
+```
+- **Track A** anchors on a sink and traces **backward** to attacker-controlled input.
+- **Track B** traces **entry point -> resource access** and checks whether an authz/ownership
+  gate exists anywhere on the path (a resource load reachable with no ownership check = IDOR).
+The graph is coarse: construct sinks used directly on input (`include $_GET[...]`, `eval`
+of a request value) aren't edges, so the agents also read code. `call_edges` should be in
+the thousands for a large app — `0` means the structural build failed.
 
 ## Tooling (hints & cross-check only — never the author of a finding)
 
@@ -171,8 +189,9 @@ ls workspace/findings | wc -l
   hit is a place to look, not a finding.
 - **Separate the model from the hunt.** `source-model` builds reusable facts once; the
   vuln tracks apply judgment on top.
-- **Sink-first.** Anchor on the finite sink set and reason backward — never enumerate
-  sources.
+- **Sink-first, flow-aware.** Anchor on the finite sink set and reason backward across
+  files using the call graph — a sink safe in its own file is often fed tainted input
+  several calls away. Track B mirrors this for entry-point -> resource access paths.
 - **Streaming, parallel, self-driving.** A and B produce concurrently; C consumes live;
   each is one long autonomous session, not a shell loop re-spawning a memory-less agent.
 - **Exhaustive.** Every module, every sink/route: find a bug or justify why it's safe.
