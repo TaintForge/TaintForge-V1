@@ -1,0 +1,15 @@
+
+targets/
+
+workspace/
+
+__pycache__/
+
+*.pyc
+
+.venv/
+
+accounts.json
+
+*.jar
+
