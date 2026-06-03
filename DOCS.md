@@ -148,6 +148,140 @@ Each of these was a real failure that forced a boundary change:
 The throughline: **push determinism into tools done once, push judgment into focused agents,
 and let independent processes coordinate only through durable, content-addressed files.**
 
+## 1.6 Analysis methodology — why model-first, sink-first, hypothesize-then-verify
+
+This section is the reasoning behind *how* TaintForge analyzes code: why it doesn't just hand
+the codebase to the LLM, why it builds a tool-made model first, why it anchors on sinks, and
+why every lead is a *hypothesis* that must be *verified*. These are not stylistic choices —
+they fall out of how LLMs and real codebases actually behave.
+
+### 1.6.1 Why not "just give the whole codebase to the LLM"?
+
+The naive approach — paste the repo into the model and ask "find the bugs" — fails on real
+applications for concrete reasons:
+
+- **It doesn't fit, and recall decays with size.** Craft is ~1,961 files; ConcreteCMS ~12k.
+  That's far beyond any context window, and even within a window, attention is not uniform —
+  a vulnerability whose source and sink sit in different files, read thousands of tokens
+  apart, is exactly the kind of long-range dependency models miss. Dumping everything yields
+  a shallow skim, not an audit.
+- **Bugs are non-local; reading is local.** A SQL injection is rarely "one line." It's
+  attacker input in `Controller.php`, passed through a service, into a query builder in
+  `ElementQuery.php` three calls away. Reading files one at a time, the model has no reliable
+  way to know which faraway functions feed a given sink. It needs a **map of how code
+  connects**, and that map is a *structural* fact, not a judgment.
+- **No notion of "done."** Freeform "look for bugs" has no coverage guarantee. The model
+  examines whatever caught its attention and stops. There's no way to say "every module was
+  considered" — which for a security audit is the whole point.
+- **Cost and nondeterminism.** Re-reading the codebase to re-derive structure on every
+  question burns tokens and gives slightly different structure each time.
+
+So the design **separates two kinds of work**: *mechanical structure extraction* (cheap,
+exact, do-once with tools) and *semantic judgment* (expensive, fuzzy, do with the model).
+The model shouldn't spend its limited attention reconstructing a call graph a parser produces
+perfectly in seconds.
+
+### 1.6.2 Why build a model (the Code Model) first?
+
+The Code Model (`workspace/CODE_MODEL.json`) is the tool-made map the model reasons *over*
+instead of reconstructing. Two layers, by design:
+
+- **`structural` (tool, tree-sitter).** Files, entry points, and the **call graph** — the
+  `caller → callee` edges, plus `<builtin-sink>` edges marking calls to dangerous primitives
+  (`query`, `exec`, `unserialize`, `include`, …). This is the connectivity the model can't
+  reliably infer from local reads but a parser gets exactly. It's what lets analysis **follow
+  flows across files**.
+- **`comprehension` (LLM).** Routes, permission model, trust boundaries, user journeys — the
+  *meaning* a parser can't extract. This is genuine judgment, so the model does it, but it
+  does it **once** and writes it down so all sessions share one consistent understanding.
+
+The split is the core principle restated at the analysis level: **let tools state facts, let
+the model interpret them.** A call edge is a fact; "this edge carries tainted data past no
+sanitizer" is an interpretation. Mixing them (asking the model to also be the parser) makes
+it worse at both.
+
+The Code Model is also what makes coverage *measurable*: because the codebase is enumerated
+into modules and a graph, you can drive analysis to visit **every** module/sink and record a
+verdict — find a bug or justify safety — rather than skim.
+
+### 1.6.3 Why sink-first (anchor on the dangerous end, trace backward)?
+
+There are two directions to hunt taint, and they are not equal in cost:
+
+- **Source-first (forward):** start at every input (`$_GET`, request body, …) and follow it
+  forward hoping it reaches something dangerous. Inputs are *everywhere*; most flows are
+  benign; the search fans out explosively and mostly into dead ends.
+- **Sink-first (backward):** start at the **finite, enumerable** set of dangerous operations
+  (the `<builtin-sink>` edges) and walk the call graph **backward** to see if attacker input
+  can reach them. 
+
+Sink-first wins because **the dangerous set is small and known**, while the input set is huge.
+Every real vulnerability *ends* at a sink — no sink, no bug — so enumerating sinks bounds the
+problem to "for each of these N dangerous places, can tainted data get here?" That's a
+tractable, checkable question per sink, and `callgraph.py --callers <sink>` / `--trace` gives
+exactly the backward paths to examine. Track A is literally this loop.
+
+(**Track B mirrors the idea for logic bugs**, but anchors on the *resource* end: start at a
+route, walk **forward** to a resource load, and ask whether an authz/ownership gate sits on
+the path. Same philosophy — anchor on the security-relevant point and check the path to it —
+applied to access control, where the "sink" is "an object getting loaded/returned" rather
+than a dangerous call.)
+
+### 1.6.4 Why hypothesize-then-verify (and why tool hits are only hypotheses)?
+
+Every lead in TaintForge is treated as a **hypothesis about a vulnerability**, never a
+conclusion — because both of the things that *produce* leads are unreliable on their own:
+
+- **Static tools over-claim.** A SAST hit (OpenGrep) means "this pattern matched," not "this
+  is exploitable." It can't see a sanitizer in a helper, a framework that auto-escapes, or a
+  guard three frames up. Treated as findings, SAST output is mostly false positives.
+- **The LLM can hallucinate a flow.** Reasoning over code, the model can convince itself a
+  path is exploitable when a check it didn't read makes it safe — or vice versa.
+
+So the pipeline is built as a **funnel that raises the burden of proof at each stage**, and
+the `status` field *is* the hypothesis-strength ladder:
+
+```
+candidate         a plausible flow exists (one analyst's reasoning)            — weakest
+cross_validated   an INDEPENDENT engine agrees the pattern is real             — corroborated
+reproduced        it actually FIRED against a live instance (PoC)              — proven
+confirmed         reproduced AND fully triaged                                 — strongest
+   ↑ false_positive (disproven, dropped) / needs_reanalysis (couldn't tell, retry)
+```
+
+- **Cross-validation** guards against one analyst's blind spot: a second, *independent*
+  method (CodeQL/OpenGrep) has to agree before a candidate is promoted. Agreement between
+  methods with different failure modes is much stronger than either alone.
+- **Dynamic reproduction is the decisive test.** A hypothesis about exploitability is settled
+  by *doing the exploit*: fire the payload, replay the cross-user request, trigger the SSRF
+  canary. Either the live system misbehaves or it doesn't — that converts belief into
+  evidence (the `repro` + `poc.py`). Anything that can't be fired is honestly marked
+  `needs_reanalysis`, not asserted.
+- **Disclosure search** is one more verification layer on a *proven* bug: is it actually
+  novel, or a known CVE? — so the strongest claims (0-day) get the most scrutiny.
+
+This is also why **the agent authors findings and tools only seed them**: a hypothesis needs
+a reasoner to form it and a test to settle it; a pattern-matcher can only *suggest where to
+look*. Letting tools write findings directly is what produced the early "0 real findings /
+all false positives" failure.
+
+### 1.6.5 The loop, summarized
+
+```
+build a MODEL with tools     →  facts (call graph, routes), do-once, exact
+form HYPOTHESES on the model →  sink-first backward taint (A) / entry→resource (B)
+                                seeded by SAST leads + the model, authored by the agent
+VERIFY, escalating proof     →  cross-validate (independent engine)
+                                → reproduce live (PoC: probe/canary)
+                                → disclosure (known vs novel)
+record verdict per unit      →  every sink/route: a finding or a justification (coverage)
+```
+
+Model-first gives the analyst a map instead of a pile of files; sink-first turns an unbounded
+hunt into a bounded checklist; hypothesize-then-verify stops both the tools' false positives
+and the model's hallucinations from reaching the report. Each choice exists to counter a
+specific, observed failure of the naive approach.
+
 ## 2. The finding contract (`schemas/finding.schema.json`)
 
 Everything flows through this one object. Key fields:
