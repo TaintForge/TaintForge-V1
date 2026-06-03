@@ -138,7 +138,7 @@ Each of these was a real failure that forced a boundary change:
 | sequential pipeline | parallel streaming A/B/C | overlap breadth (find) with depth (reproduce); enable live feedback |
 | shell loop re-invoking codex per module | one long self-driving session per role | the per-module loop reset the agent's memory every iteration |
 | tools author findings (semgrep→finding) | **agent** authors; tools only hint | semgrep-driven runs produced 0 findings (PHP not in rules); judgment was missing |
-| Semgrep OSS | OpenGrep | Semgrep OSS core segfaults on large repos (ConcreteCMS) |
+| Semgrep OSS | OpenGrep | Semgrep OSS core can segfault on very large repos |
 | stateless `probe.py` (one request) | session-aware `--jar` cookie jar | auth'd reproduction (login → protected resource, IDOR replay) was impossible without persistent sessions |
 | C decides when it's done | supervisor respawn + "never stop on your own" | C saw an empty queue at startup and exited before producers had written anything |
 | one merged `report.md` | per-vuln `report/<id>/{poc.py,finding.md}` | a fixed 2-step PoC template was wrong (pre-auth vs multi-step differ); the agent should author a PoC per bug |
@@ -160,14 +160,15 @@ they fall out of how LLMs and real codebases actually behave.
 The naive approach — paste the repo into the model and ask "find the bugs" — fails on real
 applications for concrete reasons:
 
-- **It doesn't fit, and recall decays with size.** Craft is ~1,961 files; ConcreteCMS ~12k.
-  That's far beyond any context window, and even within a window, attention is not uniform —
+- **It doesn't fit, and recall decays with size.** A mid-size app is a couple thousand files;
+  a large one is tens of thousands — far beyond any context window, and even within a window
+  attention is not uniform —
   a vulnerability whose source and sink sit in different files, read thousands of tokens
   apart, is exactly the kind of long-range dependency models miss. Dumping everything yields
   a shallow skim, not an audit.
 - **Bugs are non-local; reading is local.** A SQL injection is rarely "one line." It's
   attacker input in `Controller.php`, passed through a service, into a query builder in
-  `ElementQuery.php` three calls away. Reading files one at a time, the model has no reliable
+  a query builder three calls away. Reading files one at a time, the model has no reliable
   way to know which faraway functions feed a given sink. It needs a **map of how code
   connects**, and that map is a *structural* fact, not a judgment.
 - **No notion of "done."** Freeform "look for bugs" has no coverage guarantee. The model
@@ -332,7 +333,7 @@ Uses **tree-sitter** (with a regex backstop) to extract:
   `file_get_contents`, `curl_exec`, …) are tagged with `to: "<builtin-sink>"`.
 
 Output lives under `structural.call_graph`. On a large app `call_edges` is in the thousands
-(ConcreteCMS ≈ 73k, Craft ≈ 22k). **`call_edges: 0` means the structural build failed** —
+(tens of thousands of edges for a large app). **`call_edges: 0` means the structural build failed** —
 check tree-sitter install. The graph is *coarse*: a sink used directly on input
 (`include $_GET['x']`) is not an edge, so agents always read code too.
 
@@ -418,7 +419,7 @@ C runs continuously while A/B produce. Its loop:
 ### 6.1 Cross-validate (`cross_validate.sh`, `correlate.py`)
 Runs an **independent** engine to see if a finding's pattern is corroborated:
 - **CodeQL** for supported languages (C/C++, C#, Go, Java, JS/TS, Python, Ruby, Swift, Rust).
-- **CodeQL does not support PHP**, so PHP targets (Craft, Concrete) **auto-fall back to
+- **CodeQL does not support PHP**, so PHP targets **auto-fall back to
   OpenGrep**. `correlate.py` matches engine output to findings and bumps agreeing ones to
   `cross_validated`.
 
@@ -441,6 +442,12 @@ Flags: `-X/--method`, `-H/--header` (repeatable), `-d/--data`, `--json`, `--jar 
   user's object with the **other's** jar. A `200` with the victim's data = confirmed. This
   is why `accounts.json` needs **≥2 normal users** — admin alone can't prove cross-user
   access.
+
+`browser_probe.py` proves **XSS by execution** (Playwright headless Chromium). Reflection in
+the HTTP body is not proof; this navigates to the payload URL and reports `executed:true` only
+when a JS dialog fires or an injected marker (`window.__tf_xss`) actually ran. `--jar FILE`
+injects the cookie jar's session so stored/authenticated XSS can be reproduced. Install once:
+`pip install playwright && python3 -m playwright install chromium`.
 
 `canary.py` is the **out-of-band server** for SSRF/blind bugs, auto-started on `--url`
 (default `127.0.0.1:9111`, logging to `workspace/_canary.log`):
@@ -573,14 +580,14 @@ Detach: `Ctrl-b` then `d` (sessions keep running). Re-attach: `tmux attach -t ta
 ```
 
 ### Example: IDOR confirmed end-to-end
-1. **B** follows `AssetsController::actionGetAsset → Asset::find(id)` and sees no ownership
-   check on the path → records candidate (track B, CWE-639).
+1. **B** follows `ResourceController::actionView → Resource::findById(id)` and sees no
+   ownership check on the path → records candidate (track B, CWE-639).
 2. **C** cross-validates, then reproduces: logs alice and bob into `alice.jar`/`bob.jar`,
-   requests bob's `assetId` with `alice.jar`, gets `200` + bob's filename → `reproduced`,
+   requests bob's resource id with `alice.jar`, gets `200` + bob's data → `reproduced`,
    `repro.success=true`.
-3. **C** web-searches "Craft CMS \<version\> asset IDOR CVE"; finds nothing for this exact
+3. **C** web-searches "<product> <version> <endpoint> IDOR CVE"; finds nothing for this exact
    endpoint → `disclosure=novel`.
-4. **C** writes a `requests`-based `poc.py` (login alice → GET bob's asset → assert leak),
+4. **C** writes a `requests`-based `poc.py` (login alice → GET bob's resource → assert leak),
    stored in `repro.poc_script`.
 5. `emit_poc.py` writes `report/<id>/poc.py` + `finding.md`; `triage.py` lists it under
    **⚠️ Potential 0-day**.
@@ -615,7 +622,7 @@ normal users plus an admin**, e.g.:
 CODEX_CMD="codex exec --sandbox workspace-write \
   --config sandbox_workspace_write.network_access=true \
   --config web_search=live" \
-  ./start.sh -u http://127.0.0.1:32778 targets/craftcms
+  ./start.sh -u http://localhost:8080 targets/<app>
 ```
 - `network_access=true` — without it live probes fail with `Operation not permitted`.
 - `web_search=live` — without it the known-vs-novel (0-day) step can't run.

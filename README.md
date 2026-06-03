@@ -142,7 +142,7 @@ the thousands for a large app — `0` means the structural build failed.
 - **tree-sitter** — language-agnostic AST / call graph for the Code Model.
 - **Semgrep / OpenGrep** — Track A leads + Track A-style cross-validation. OpenGrep is
   preferred: free for private code, restored cross-file taint, and a more stable core
-  (Semgrep OSS segfaults on large repos like ConcreteCMS).
+  (Semgrep OSS can segfault on very large repos).
 - **CodeQL** — deep cross-validation in convergence. Supports C/C++/C#/Go/Java/JS/TS/
   Python/Ruby/Swift/Rust — **not PHP**, so PHP targets auto-fall back to OpenGrep. Free only
   for OSI open-source / research; private code needs GitHub Advanced Security.
@@ -199,7 +199,7 @@ sandbox's **network** and **web search** enabled, so use a `CODEX_CMD` like:
 CODEX_CMD="codex exec --sandbox workspace-write \
   --config sandbox_workspace_write.network_access=true \
   --config web_search=live" \
-  ./start.sh -u http://127.0.0.1:32778 targets/<app>
+  ./start.sh -u http://localhost:8080 targets/<app>
 ```
 Without `network_access` the live probes fail with `Operation not permitted`; without
 `web_search` the known-vs-novel (0-day) classification can't run.
@@ -229,6 +229,9 @@ When you pass `-u/--url`, the convergence session proves findings against the ru
 - **IDOR/authz** is proven by replaying **two identities**: log alice and bob into separate
   jars, then request bob's object with alice's jar — a `200` with bob's data confirms it.
   This needs ≥2 normal accounts in `accounts.json` (admin alone can't prove cross-user access).
+- **XSS** is proven by **execution**, not reflection: `browser_probe.py` opens the payload
+  URL in headless Chromium (Playwright) and reports `executed:true` only when a dialog fires
+  or an injected marker runs (`--jar` injects a session for stored/authed XSS).
 - **SSRF / blind** uses **`canary.py`**, an out-of-band HTTP listener auto-started on `--url`
   (`127.0.0.1:9111`). The agent makes the target fetch `http://<canary>/<token>`, then
   `canary.py check <token>` — a HIT proves SSRF. Internal/blind SSRF without a callback is

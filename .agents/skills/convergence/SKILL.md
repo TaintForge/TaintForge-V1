@@ -50,6 +50,12 @@ probe.py -X POST "$URL/<login>" -d '<...>'                        --jar bob.jar
   owned content) -> IDOR confirmed. For priv-esc, hit an admin-only action with a
   low-priv jar. Two identities, real sessions - that is the proof.
 
+- **XSS:** reflecting a payload in the HTTP body is NOT proof - prove EXECUTION in a real
+  browser with `.agents/skills/convergence/scripts/browser_probe.py --url "<url-with-payload>"`
+  (add `--jar a.jar` for stored/authenticated XSS; cookies from the jar are injected). It
+  reports `executed:true` when a dialog fires or an injected marker (`window.__tf_xss`) ran.
+  Use a payload that signals execution, e.g. `<script>alert(1)</script>` or
+  `<img src=x onerror=window.__tf_xss=1>`. Only `executed:true` counts as reproduced.
 - **SSRF / blind (OOB):** an out-of-band canary runs (see the live-target note for host/port).
   Make the target fetch `http://<canary>/<uniqueToken>` through the vulnerable parameter,
   then `.agents/skills/convergence/scripts/canary.py check <uniqueToken>` - a HIT proves it.

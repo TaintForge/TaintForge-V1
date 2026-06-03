@@ -143,7 +143,9 @@ candidate/cross_validated findings (highest severity first), then
    .agents/skills/convergence/scripts/probe.py. It keeps a SESSION via --jar FILE: log in
    each account from workspace/_accounts.json into its own jar (find the login route/body
    from the code yourself), then reuse that jar to hit protected resources. Track A: fire
-   the payload and look for the sink triggering. Track B (IDOR/authz): with account A's jar,
+   the payload and look for the sink triggering. For XSS specifically, reflection is NOT
+   proof - confirm EXECUTION with .agents/skills/convergence/scripts/browser_probe.py (headless
+   browser; --jar for stored/authed XSS); only executed:true counts as reproduced. Track B (IDOR/authz): with account A's jar,
    request account B's object/action - if A gets B's data it is confirmed; for priv-esc hit
    an admin action with a low-priv jar. Update status reproduced/false_positive/
    needs_reanalysis via write_finding.py --update <id>. ALWAYS attach a PoC: record the

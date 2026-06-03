@@ -136,6 +136,7 @@ candidate --cross-val--> cross_validated --repro--> reproduced --> confirmed
   OpenGrep: free for private code, cross-file taint, stable core (Semgrep OSS segfaults on
   large repos). Leads go to `workspace/hints/`, never straight to findings.
 - **CodeQL** - deep cross-validation in convergence; no PHP (auto-fallback to OpenGrep).
-- **probe.py / canary.py** - dynamic reproduction (sessions + out-of-band SSRF).
+- **probe.py / canary.py / browser_probe.py** - dynamic reproduction (HTTP sessions,
+  out-of-band SSRF, and headless-browser XSS *execution* proof).
 
 Verify a tool exists before using it; if missing, say so and proceed with what's available.
