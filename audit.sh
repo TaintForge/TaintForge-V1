@@ -54,19 +54,24 @@ session to prove (or disprove) IDOR/authz bugs."
     ACCT_NOTE="No accounts file found at $ACCOUNTS - reproduce only what is reachable
 unauthenticated, and note where authenticated testing is needed."
   fi
-  # out-of-band canary for SSRF/blind confirmation
-  CANARY_PORT="${CANARY_PORT:-9111}"
-  CANARY_HOST="${CANARY_HOST:-127.0.0.1}"
+  # out-of-band canary for SSRF/blind confirmation.
+  # .env can set SSRF_HOST/SSRF_PORT so callbacks use an externally-reachable address the
+  # target (often in its own container/network) can actually reach - 127.0.0.1 usually can't.
+  [ -f .env ] && set -a && . ./.env && set +a
+  CANARY_PORT="${SSRF_PORT:-${CANARY_PORT:-9111}}"
+  CANARY_HOST="${SSRF_HOST:-${CANARY_HOST:-127.0.0.1}}"
   python3 "$S/convergence/scripts/canary.py" serve --port "$CANARY_PORT" \
       --log workspace/_canary.log > workspace/_log_canary.txt 2>&1 &  PCAN=$!
   DYN="A LIVE INSTANCE of the target is running at: $URL
 Use it for dynamic reproduction. Send requests with
 .agents/skills/convergence/scripts/probe.py (it keeps sessions via --jar FILE; e.g.
 probe.py -X GET \"$URL/<path>\" --jar a.jar). $ACCT_NOTE
-An OUT-OF-BAND CANARY is running at http://$CANARY_HOST:$CANARY_PORT for SSRF/blind bugs:
-make the target fetch http://$CANARY_HOST:$CANARY_PORT/<uniqueToken> (via the vulnerable
-param), then run .agents/skills/convergence/scripts/canary.py check <uniqueToken> - a HIT
-proves SSRF out-of-band. For internal/blind SSRF without a callback, compare responses to
+An OUT-OF-BAND CANARY is running on port $CANARY_PORT and is reachable from the target at
+http://$CANARY_HOST:$CANARY_PORT (externally-routable). For SSRF/blind bugs make the target
+fetch http://$CANARY_HOST:$CANARY_PORT/<uniqueToken> via the vulnerable param (get the URL
+with .agents/skills/convergence/scripts/canary.py url <uniqueToken>), then run
+.agents/skills/convergence/scripts/canary.py check <uniqueToken> - a HIT proves SSRF
+out-of-band. For internal/blind SSRF without a callback, compare responses to
 http://127.0.0.1:<internalport> or http://169.254.169.254/ instead.
 Only send requests to $URL and the canary - never any other host."
   echo "== live target: $URL  | accounts: $([ -f "$ACCOUNTS" ] && echo "$ACCOUNTS ($N)" || echo none)  | canary: $CANARY_HOST:$CANARY_PORT =="
