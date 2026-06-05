@@ -256,6 +256,54 @@
           "description": "why classified novel/known (what the search showed)"
         }
       }
+    },
+    "exploit": {
+      "type": "object",
+      "description": "Deep exploitation result from agent D (only for critical reproduced findings)",
+      "properties": {
+        "depth": {
+          "type": "string",
+          "enum": [
+            "shallow",
+            "chained",
+            "weaponized"
+          ]
+        },
+        "primitive": {
+          "type": "string",
+          "description": "the proven base capability"
+        },
+        "max_impact": {
+          "type": "string",
+          "description": "highest verified impact reached"
+        },
+        "steps": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "mitigations_bypassed": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "constraints": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "honest bounds, e.g. only single-token commands"
+        },
+        "working_poc": {
+          "type": "string",
+          "description": "full source of exploit.py"
+        },
+        "oob_evidence": {
+          "type": "string"
+        }
+      }
     }
   }
 }

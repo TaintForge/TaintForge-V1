@@ -81,9 +81,13 @@ COMMON="targets/ is READ-ONLY; never modify it. Your persistent memory is worksp
 use it as a notebook so you go DEEPER across iterations instead of repeating. Findings are
 authored ONLY by you via .agents/skills/_shared/write_finding.py (file-locked,
 safe for parallel writers). Read workspace/findings/ before writing so you don't duplicate.
-Walk EVERY module in workspace/coverage.json; for each, either record a finding or justify
-why it's safe. You don't get tired - keep going until repeated passes find nothing new.
-For ConcreteCMS the real code is concrete/ and concrete/src, not the near-empty application/.
+coverage.py models the codebase as a TREE (directory -> module -> entry point). Drive your
+sweep with .agents/skills/source-model/scripts/coverage.py: --next gives the next pending
+module ATTACK-SURFACE FIRST (modules exposing routes/handlers before leaf libraries); --tree
+shows each module's entry points (the routes an attacker can actually reach). Analyze every
+module, but start from those with entry points and trace inward from each route. For each
+module either record a finding or justify why it's safe, then coverage.py --done <module>.
+You don't get tired - keep going until repeated passes find nothing new.
 $DYN"
 
 MISSION_A="You are PRODUCER A of a white-box security assessment. Focus ONLY on
@@ -174,7 +178,43 @@ human kills you. Each cycle: process any candidate/cross_validated findings, the
 and recheck.
 Use the convergence skill. $DYN"
 
-echo "== launching 3 parallel Codex sessions (auto-respawn until deadline / stop) =="
+MISSION_D="You are the EXPLOITATION agent. You do NOT find new bugs and you do NOT triage the
+queue. You take findings that the consumer already proved (status reproduced or confirmed)
+and ONLY the genuinely critical classes - rce, command-injection, sql-injection, auth-bypass,
+deserialization, ssrf-to-internal, path-traversal-to-rce, file-upload-to-rce - and turn a
+proof-of-concept into a fully understood, weaponized exploit. Loop continuously:
+1) select: read workspace/findings/*.json; pick status in {reproduced,confirmed} whose
+   vuln_class is one of the critical classes above and whose exploit.depth is missing or
+   'shallow' (skip everything else - low/medium and unproven findings are not your job).
+   Highest severity first.
+2) deepen: starting from the existing repro, push the exploit as far as it really goes, and
+   VERIFY each step against the live target ($DYN) or, when no live target, against the code
+   plus a local shell/interpreter model of the sink. Concretely:
+   - chain & escalate: from the proven primitive, reach the highest real impact (e.g. blind
+     SQLi -> data exfic via boolean/time; command-injection limited to one token -> stage a
+     payload file and invoke it by path; SSRF -> hit cloud metadata/internal services with
+     canary.py; auth-bypass -> reach an admin-only action).
+   - defeat mitigations: when a sanitizer/escape/quoting/WAF blocks the obvious payload,
+     analyze EXACTLY what it permits (which bytes/metacharacters survive) and find a working
+     bypass; prove the bypass actually executes, do not hand-wave it.
+   - confirm execution out-of-band where relevant with
+     .agents/skills/convergence/scripts/canary.py (SSRF/blind RCE) or browser_probe.py (XSS->
+     account takeover chains).
+3) record honestly: write the result back with write_finding.py --update <id> into an
+   exploit object: {depth: shallow|chained|weaponized, primitive, max_impact, steps:[...],
+   mitigations_bypassed:[...], constraints:[...], working_poc, oob_evidence}. Do NOT overstate
+   - if the impact is bounded (e.g. only argument-less single-token commands run), say so
+   precisely and record the exact constraint. A correct 'bounded' result is worth more than
+   an exaggerated one.
+4) materialize: write a standalone weaponized exploit as workspace/report/<id>/exploit.py
+   (requests/raw sockets as needed, copy-pasteable, prints PASS plus the captured evidence),
+   separate from C's poc.py, and store its full source in exploit.working_poc.
+NEVER attack a host you were not pointed at; the only live target is the one in $DYN. Treat
+the target as your own lab. DO NOT EVER STOP ON YOUR OWN: if nothing currently qualifies,
+sleep ~45s and re-scan - the consumer keeps promoting findings to reproduced over time. Run
+as an infinite loop until a human kills you. Use the convergence skill. $DYN"
+
+echo "== launching 4 parallel Codex sessions (auto-respawn until deadline / stop) =="
 MAX_HOURS="${MAX_HOURS:-12}"
 DEADLINE=$(( $(date +%s) + MAX_HOURS*3600 ))
 rm -f workspace/_stop
@@ -198,10 +238,11 @@ supervise(){ # $1=tag $2=logfile $3=mission  -> echoes supervisor pid
 PA=$(supervise A workspace/_log_A.txt "$MISSION_A")
 PB=$(supervise B workspace/_log_B.txt "$MISSION_B")
 PC=$(supervise C workspace/_log_C.txt "$MISSION_C")
-echo "$PA $PB $PC ${PCAN:-}" > workspace/_pids
-echo "  A=$PA  B=$PB  C=$PC  (supervisors; auto-respawn, ${MAX_HOURS}h budget)"
+PD=$(supervise D workspace/_log_D.txt "$MISSION_D")
+echo "$PA $PB $PC $PD ${PCAN:-}" > workspace/_pids
+echo "  A=$PA  B=$PB  C=$PC  D=$PD  (supervisors; auto-respawn, ${MAX_HOURS}h budget)"
 
-stop_all(){ touch workspace/_stop; kill $PA $PB $PC ${PCAN:-} 2>/dev/null; pkill -f "codex exec" 2>/dev/null; }
+stop_all(){ touch workspace/_stop; kill $PA $PB $PC $PD ${PCAN:-} 2>/dev/null; pkill -f "codex exec" 2>/dev/null; }
 
 # SPAWN_ONLY=1 -> return immediately (start.sh's tmux wrapper drives the display).
 if [ "${SPAWN_ONLY:-0}" = "1" ]; then

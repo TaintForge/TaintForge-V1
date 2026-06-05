@@ -95,6 +95,19 @@ def main():
             L.append(f"- **{f.get('severity_estimate','?')}** {f.get('vuln_class','?')} "
                      f"at {sk.get('file','?')}:{sk.get('line','?')} - "
                      f"{(f.get('disclosure') or {}).get('rationale','')}")
+    exploited=[f for f in ranked if f.get("exploit") and (f.get("exploit") or {}).get("depth") in ("chained","weaponized")]
+    if exploited:
+        L.append("\n## \U0001f4a5 Weaponized / chained exploits\n")
+        for f in exploited:
+            ex=f.get("exploit") or {}; sk=f.get("sink",{})
+            L.append(f"- **{f.get('severity_estimate','?')}** {f.get('vuln_class','?')} "
+                     f"at {sk.get('file','?')}:{sk.get('line','?')} - "
+                     f"depth **{ex.get('depth','?')}**; primitive: {ex.get('primitive','?')}; "
+                     f"max impact: {ex.get('max_impact','?')}")
+            cons=ex.get('constraints') or []
+            if cons: L.append(f"  - constraints (honest bounds): {'; '.join(cons)}")
+            byp=ex.get('mitigations_bypassed') or []
+            if byp: L.append(f"  - mitigations bypassed: {'; '.join(byp)}")
     L.append("\n## Ranked findings\n")
     L.append("| # | sev | status | disclosure | class | CWE | OWASP | location | dups |")
     L.append("|---|-----|--------|-----------|-------|-----|-------|----------|------|")
@@ -116,10 +129,23 @@ def main():
         rep=f.get('repro',{})
         if rep.get('attempted'):
             L.append(f"- repro: success={rep.get('success')} | {rep.get('observation','')}")
+            if rep.get('poc'):
+                L.append("- PoC:")
+                L.append("```http")
+                L.append(str(rep['poc']).strip())
+                L.append("```")
+            if rep.get('response'):
+                L.append(f"- response evidence: {rep['response']}")
         d=f.get('disclosure') or {}
         if d.get('checked'):
             refs=", ".join(d.get('references',[]) or [])
             L.append(f"- disclosure: {d.get('status','?')}{(' ['+refs+']') if refs else ''} - {d.get('rationale','')}")
+        ex=f.get('exploit') or {}
+        if ex.get('depth'):
+            L.append(f"- exploit: depth={ex.get('depth')}; primitive={ex.get('primitive','?')}; max_impact={ex.get('max_impact','?')}")
+            if ex.get('steps'): L.append("  - steps: " + " -> ".join(ex['steps']))
+            if ex.get('constraints'): L.append("  - constraints: " + "; ".join(ex['constraints']))
+            if ex.get('oob_evidence'): L.append(f"  - OOB evidence: {ex['oob_evidence']}")
         L.append("")
     open(args.out,"w").write("\n".join(L))
     print(f"\n[triage] ranked {len(ranked)} -> {args.out}")

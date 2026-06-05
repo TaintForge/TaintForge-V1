@@ -72,10 +72,10 @@ discovering #20. It also makes the **feedback loop** real — C can flip a findi
 `needs_reanalysis` and the producers, still alive, can revisit it. A batch pipeline couldn't
 do that without another full pass.
 
-### 1.5.3 How three processes stay in sync (the hard part)
+### 1.5.3 How four processes stay in sync (the hard part)
 
-The three sessions are **separate OS processes** (separate `codex exec` invocations). They
-share no memory. So coordination has to go through something all three — and the supervising
+The four sessions are **separate OS processes** (separate `codex exec` invocations). They
+share no memory. So coordination has to go through something all four — and the supervising
 shell, and any human watching — can see and that *survives a respawn*. That something is the
 **filesystem** (`workspace/`). No database, no message broker, no socket: those add infra,
 and (for an in-memory queue) would die when a session ends. The filesystem is durable, zero
@@ -104,7 +104,7 @@ isn't an explicit update, the writer *keeps the original* and only appends a `hi
 ("re-seen") — it never clobbers another session's data. With `--update <id>` it *merges* new
 fields onto the existing object and preserves the full `history`. So the file accumulates
 truth from multiple sessions instead of the last writer winning blindly. The `history` array
-is the audit trail of who-touched-what-when across all three sessions.
+is the audit trail of who-touched-what-when across all four sessions.
 
 **`status` is the hand-off signal.** The lifecycle field is a tiny state machine living on
 disk, and it's how producer and consumer coordinate *without talking directly*:
@@ -135,7 +135,7 @@ Each of these was a real failure that forced a boundary change:
 
 | from | to | why |
 |---|---|---|
-| sequential pipeline | parallel streaming A/B/C | overlap breadth (find) with depth (reproduce); enable live feedback |
+| sequential pipeline | parallel streaming A/B/C + exploitation D | overlap breadth (find) with depth (reproduce/weaponize); enable live feedback |
 | shell loop re-invoking codex per module | one long self-driving session per role | the per-module loop reset the agent's memory every iteration |
 | tools author findings (semgrep→finding) | **agent** authors; tools only hint | semgrep-driven runs produced 0 findings (PHP not in rules); judgment was missing |
 | Semgrep OSS | OpenGrep | Semgrep OSS core can segfault on very large repos |
@@ -299,6 +299,7 @@ Everything flows through this one object. Key fields:
 | `correlation_id` | C | groups duplicates across tracks/engines |
 | `repro` | C | `{attempted, success, poc, response, observation, env, poc_script}` |
 | `disclosure` | C | `{checked, status: known\|novel\|inconclusive, references[], rationale}` |
+| `exploit` | D | `{depth: shallow\|chained\|weaponized, primitive, max_impact, steps[], mitigations_bypassed[], constraints[], working_poc, oob_evidence}` |
 | `history` | all | append-only audit trail |
 
 **Status lifecycle**
@@ -356,16 +357,28 @@ The agent fills application understanding into the Code Model: `service_identity
 Track B depends heavily on this (you can't reason about "missing authorization" without
 knowing the permission model and routes).
 
-### 3.4 `coverage.py` (exhaustiveness)
-Splits the codebase into **modules** so agents cover everything in bounded chunks instead of
-skimming once. Vendor/tests excluded; oversized dirs split.
+### 3.4 `coverage.py` (exhaustiveness, as an attack-surface tree)
+Models the codebase as a **hierarchical tree: directory → module → entry point**, so agents
+cover everything in bounded chunks *and* in priority order, instead of skimming once.
+Vendor/tests excluded; oversized dirs split (`TF_SPLIT_THRESHOLD`, default 120;
+`TF_MAX_DEPTH`, default 4). At `--init` it reads `CODE_MODEL.json` and annotates each module
+with the **entry points** (routes/handlers) it exposes, so coverage reflects *reachable
+attack surface*, not just files on disk.
 ```bash
-coverage.py --init <target>   # build the module list -> workspace/coverage.json
-coverage.py --next            # claim the next unanalyzed module
+coverage.py --init <target>   # build the module tree -> workspace/coverage.json
+coverage.py --next            # next pending module, ATTACK-SURFACE FIRST (routes before leaf libs)
 coverage.py --done <module>   # mark a module analyzed
-coverage.py --list            # list modules + status
-coverage.py --summary         # progress (the dashboard's coverage bar)
+coverage.py --tree            # print directory->module->entry-point tree with per-node status
+coverage.py --list            # list module paths
+coverage.py --summary         # module progress + entry-point-surface progress separately
 ```
+Why: a flat module list treats a near-empty `vendor/` chunk and a route-dense API directory
+as equal, and `--next` would hand them out alphabetically. The tree pulls the agent to the
+**code an attacker can actually reach first** (where the bugs that matter live), and makes
+"100% coverage" mean "every reachable route was traced inward," not "every file was skimmed."
+Entry-point detection covers Python/Express/Spring/Go plus **Ruby Grape/Rails** (`get`/`post`/
+`resource`/`namespace`/`route_param`, Rails routes, controller actions) — so large Ruby apps
+like GitLab surface their real API endpoints.
 
 ---
 
@@ -505,10 +518,44 @@ status/class, a **novel/0-day counter**, latest hits, and elapsed time.
 
 ---
 
+## 6.5 Exploitation — agent D (weaponize the critical findings)
+
+C proves a bug is real; **D** turns that proof into a fully understood exploit, but only for
+the genuinely critical classes (rce, command-injection, sql-injection, auth-bypass,
+deserialization, ssrf-to-internal). It loops:
+
+1. **Select.** Read `findings/*.json`; pick `status` in {reproduced, confirmed} whose
+   `vuln_class` is critical and whose `exploit.depth` is missing or `shallow`. Skip
+   everything else — low/medium and unproven findings aren't D's job. Highest severity first.
+2. **Deepen, verifying every step** against the live target (or, with no live URL, the code
+   plus a local shell/interpreter model of the sink):
+   - **chain & escalate** from the proven primitive to the highest real impact (blind SQLi →
+     boolean/time exfil; a command-injection limited to one token → stage a payload file and
+     invoke it by path; SSRF → cloud metadata / internal services via `canary.py`; auth-bypass
+     → reach an admin-only action).
+   - **defeat mitigations**: when a sanitizer/escape/quoting/WAF blocks the obvious payload,
+     work out *exactly* which bytes/metacharacters survive and find a bypass that actually
+     executes — no hand-waving.
+3. **Record honestly** into the finding's **`exploit`** object: `{depth: shallow|chained|
+   weaponized, primitive, max_impact, steps[], mitigations_bypassed[], constraints[],
+   working_poc, oob_evidence}`. If the impact is bounded, the bound goes in `constraints`
+   verbatim — a correct "bounded" result outranks an exaggerated one.
+4. **Materialize** `workspace/report/<id>/exploit.py` (standalone, prints PASS + captured
+   evidence), separate from C's `poc.py`. `triage.py` surfaces chained/weaponized findings in
+   a **💥 Weaponized / chained exploits** section; the dashboard shows a 💥 counter.
+
+**Why a separate agent.** Reproduction (C) and weaponization (D) are different mindsets and
+different time budgets: C must keep the queue moving across all findings; D goes deep on a few.
+Splitting them keeps C from stalling on one hard exploit while late findings pile up. D is
+constrained to the target it was pointed at — it weaponizes for assets you own or are
+authorized to test, never an arbitrary host.
+
+---
+
 ## 7. The shared writer (`_shared/write_finding.py`)
 
-The single way findings are created/updated, used by A, B, and C. It is **file-locked**
-(`fcntl`) and **append-only**, so three concurrent sessions never corrupt the same file.
+The single way findings are created/updated, used by A, B, C, and D. It is **file-locked**
+(`fcntl`) and **append-only**, so four concurrent sessions never corrupt the same file.
 ```bash
 write_finding.py --file f.json                 # create from a finding JSON
 write_finding.py --update <id> --file patch.json   # merge an update (status, repro, disclosure...)
@@ -529,7 +576,7 @@ Steps it performs:
    `coverage.json`.
 2. If `--url`: copy accounts to `workspace/_accounts.json`, start `canary.py serve` in the
    background, and build the live-target instructions (`DYN`).
-3. Build the three mission strings (A/B/C) and launch each under a **supervisor**:
+3. Build the four mission strings (A/B/C/D) and launch each under a **supervisor**:
    ```
    supervise(){ ( while no _stop and now < DEADLINE; do
                     $CODEX_CMD "$MISSION"; sleep 5;   # respawn on exit

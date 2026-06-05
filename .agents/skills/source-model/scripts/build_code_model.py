@@ -35,6 +35,14 @@ ROUTE_PATTERNS = [
     (r'@(Get|Post|Put|Patch|Delete|Request)Mapping\(\s*[\'"]?([^\'")]+)?', "http-route"),
     # go: r.HandleFunc("/x", ...), mux.Get("/x", ...)
     (r'\b\w+\.(HandleFunc|Handle|Get|Post|Put|Delete)\(\s*[\'"]([^\'"]+)[\'"]', "http-route"),
+    # ruby grape: get '/x', post :resume, delete ':id'  (method then optional path/symbol)
+    (r'\b(get|post|put|patch|delete)\s+[\'":]([\w/:.\-]+)', "http-route"),
+    # ruby grape resource/namespace/route_param blocks
+    (r'\b(resource|resources|namespace|route_param|segment)\s+[\'":]([\w/:.\-]+)', "http-route"),
+    # rails routes.rb: get '/x' => ..., post '/y', to: ...
+    (r'\b(get|post|put|patch|delete|match)\s+[\'"]([^\'"]+)[\'"]\s*(?:=>|,)', "http-route"),
+    # rails controller action defs are entry-ish: def index/show/create/update/destroy
+    (r'\bdef\s+(index|show|create|update|destroy|new|edit)\b()', "controller-action"),
 ]
 
 def detect_language(path):

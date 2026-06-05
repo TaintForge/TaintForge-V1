@@ -24,6 +24,8 @@ def main():
         try:
             subprocess.run(["python3",".agents/skills/convergence/scripts/triage.py"],
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=20)
+            subprocess.run(["python3",".agents/skills/convergence/scripts/emit_poc.py"],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=20)
         except Exception: pass
         fs=[load(p) for p in glob.glob(f"{findings_dir}/*.json")]; fs=[f for f in fs if f]
         st=collections.Counter(f.get("status","candidate") for f in fs)
@@ -38,6 +40,11 @@ def main():
         out.append(f"  {C['b']}findings{C['reset']}  {len(fs)} total")
         novel=[f for f in fs if (f.get("disclosure") or {}).get("status")=="novel"]
         if novel: out.append(f"  {C['b']}{C['red']}\u26a0 potential 0-day{C['reset']}  {len(novel)} (novel, reproduced)")
+        exps=[f for f in fs if f.get("exploit")]
+        weap=[f for f in exps if (f.get("exploit") or {}).get("depth")=="weaponized"]
+        chained=[f for f in exps if (f.get("exploit") or {}).get("depth")=="chained"]
+        if exps:
+            out.append(f"  {C['b']}{C['red']}\U0001f4a5 exploited{C['reset']}  {len(weap)} weaponized, {len(chained)} chained")
         for s in ["confirmed","reproduced","cross_validated","candidate","needs_reanalysis","false_positive"]:
             if st.get(s): out.append(f"      {STT.get(s,'')}{s:<16}{C['reset']} {st[s]}")
         if cl:

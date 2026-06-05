@@ -27,13 +27,15 @@ DASH="python3 $S/convergence/scripts/dashboard.py"
 TA="tail -n +1 -f workspace/_log_A.txt"
 TB="tail -n +1 -f workspace/_log_B.txt"
 TC="tail -n +1 -f workspace/_log_C.txt"
+TD="tail -n +1 -f workspace/_log_D.txt"
 
 # Build a reliable 2x2. Create the detached session BIG (-x/-y) so later splits never hit
 # tmux's minimum-pane-size limit (that was dropping the 4th/C pane on an 80x24 default).
 P_A=$(tmux new-session -d -s "$SESS" -n forge -x 250 -y 60 -P -F '#{pane_id}' "$TA")
 P_B=$(tmux split-window -h -t "$P_A" -P -F '#{pane_id}' "$TB")    # top row:    A | B
-P_C=$(tmux split-window -v -t "$P_A" -P -F '#{pane_id}' "$TC")    # bottom-left:  C
-P_D=$(tmux split-window -v -t "$P_B" -P -F '#{pane_id}' "$DASH")  # bottom-right: DASHBOARD
+P_C=$(tmux split-window -v -t "$P_A" -P -F '#{pane_id}' "$TC")    # mid-left:   C
+P_D=$(tmux split-window -v -t "$P_B" -P -F '#{pane_id}' "$TD")    # mid-right:  D (exploit)
+P_DASH=$(tmux split-window -v -t "$P_C" -P -F '#{pane_id}' "$DASH") # bottom: DASHBOARD
 tmux select-layout -t "$SESS:forge" tiled
 
 # pane border titles, bound to the captured ids (won't scramble)
@@ -42,7 +44,8 @@ tmux set  -t "$SESS" pane-border-format " #[bold]#{?pane_active,#[fg=colour44],#
 tmux select-pane -t "$P_A" -T "🅐 INJECT / data-flow (A)"
 tmux select-pane -t "$P_B" -T "🅑 LOGIC / access-control (B)"
 tmux select-pane -t "$P_C" -T "🅒 CONVERGE / reproduce (C)"
-tmux select-pane -t "$P_D" -T "📊 DASHBOARD"
+tmux select-pane -t "$P_D" -T "🅓 EXPLOIT / weaponize (D)"
+tmux select-pane -t "$P_DASH" -T "📊 DASHBOARD"
 tmux set  -t "$SESS" mouse on
 tmux select-pane -t "$P_C"   # focus the convergence pane
 

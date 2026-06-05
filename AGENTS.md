@@ -1,15 +1,18 @@
 # AGENTS.md — TaintForge (AI-agent white-box security assessment)
 
-You are one of **three Codex sessions** run in parallel by `audit.sh`. Read this first, then
+You are one of **four Codex sessions** run in parallel by `audit.sh`. Read this first, then
 your role's skill under `.agents/skills/`. **You are the analyst — you author findings.**
-Tools (tree-sitter, OpenGrep/CodeQL, probe.py, canary.py) only give leads and cross-checks;
-a tool hit is a place to look, never a finding by itself.
+Tools (tree-sitter, OpenGrep/CodeQL, probe.py, canary.py, browser_probe.py) only give leads
+and cross-checks; a tool hit is a place to look, never a finding by itself.
 
-The three roles share one streaming queue, `workspace/findings/`:
+The four roles share one streaming queue, `workspace/findings/`:
 
 - **A — producer, injection / data-flow.** Skill: `vuln-track-a`.
 - **B — producer, logic / access-control.** Skill: `vuln-track-b`.
 - **C — consumer, convergence.** Skill: `convergence`. Runs continuously while A & B produce.
+- **D — exploitation.** Skill: `convergence`. Takes only the critical findings C already
+  proved (reproduced/confirmed) and weaponizes them — chaining, escalating impact, defeating
+  sanitizers — recording results in the finding's `exploit` object with **honest bounds**.
 
 Everything is glued by one contract: `schemas/finding.schema.json`.
 
@@ -18,10 +21,11 @@ Everything is glued by one contract: `schemas/finding.schema.json`.
 - Only analyze code under `targets/`. Never read or exfiltrate anything outside this repo.
 - `targets/` is **read-only**. Never modify the code under assessment.
 - Author/update findings **only** via `.agents/skills/_shared/write_finding.py` — it is
-  file-locked and append-only, safe for the three concurrent sessions. Never hand-edit a
+  file-locked and append-only, safe for the four concurrent sessions. Never hand-edit a
   finding file or overwrite another finding.
-- Dynamic reproduction hits **only** the live target URL you were given and the local SSRF
-  canary — never any other host.
+- Dynamic reproduction and exploitation hit **only** the live target URL you were given and
+  the local SSRF canary — never any other host. Agent D weaponizes findings for assets you
+  own or are authorized to test; it never targets a host it wasn't pointed at.
 - Findings must validate against `schemas/finding.schema.json`; CODE_MODEL against
   `schemas/code_model.schema.json`.
 
@@ -30,8 +34,8 @@ Everything is glued by one contract: `schemas/finding.schema.json`.
 ```
 TaintForge/                        <- repo root (cwd)
   AGENTS.md                        <- you are here
-  audit.sh                         <- engine: seeds + spawns A/B/C under supervisors
-  start.sh                         <- tmux 4-pane wrapper around audit.sh
+  audit.sh                         <- engine: seeds + spawns A/B/C/D under supervisors
+  start.sh                         <- tmux 5-pane wrapper around audit.sh
   accounts.json                    <- live test accounts (>=2 normal users + admin for IDOR)
   schemas/{finding,code_model}.schema.json
   .agents/skills/
@@ -54,8 +58,10 @@ TaintForge/                        <- repo root (cwd)
 
 > Codex discovers skills under `.agents/skills/`. `workspace/` is your memory - use it as a
 > notebook to go DEEPER across iterations instead of repeating. You don't get tired: keep
-> going until repeated passes find nothing new. Cover EVERY module in `coverage.json` - for
-> each, record a finding or justify why it's safe.
+> going until repeated passes find nothing new. `coverage.json` is a TREE (directory ->
+> module -> entry point): use `coverage.py --next` (attack-surface first) and `--tree` to
+> drive the sweep, starting from modules that expose routes and tracing inward from each.
+> Cover EVERY module - for each, record a finding or justify why it's safe.
 
 ## You are one long session, and you may be respawned
 
@@ -79,7 +85,9 @@ callgraph.py --callers <sink>        # A: who reaches query/unserialize/include/
 callgraph.py --callees <handler>     # B: what a route handler calls
 callgraph.py --trace   <sink>        # A: backward paths into a sink
 ```
-`coverage.py --init|--next|--done|--summary` tracks exhaustive module coverage.
+`coverage.py --init|--next|--done|--summary|--tree` tracks exhaustive coverage as a
+directory->module->entry-point tree; `--next` prioritizes attack surface (route-exposing
+modules first), `--summary` reports entry-point-surface progress separately.
 
 ## Role contracts
 
@@ -88,6 +96,7 @@ callgraph.py --trace   <sink>        # A: backward paths into a sink
 | A (vuln-track-a) | CODE_MODEL `.structural` + OpenGrep leads in `workspace/hints/` | sink-first: anchor a sink, trace **backward** across files to attacker input, judge sanitizers | `findings/*.json` track=A, status=candidate |
 | B (vuln-track-b) | CODE_MODEL `.comprehension` + `_authz_matrix.json` | trace **entry -> resource**; is there an authn/role/**ownership** gate anywhere on the path? a `findById` reachable with no ownership check = IDOR | `findings/*.json` track=B, status=candidate |
 | C (convergence) | `findings/*.json` (continuously) | cross-validate -> reproduce -> disclosure -> PoC -> triage | updates findings; `report/report.md`; `report/<id>/{poc.py,finding.md}` |
+| D (exploitation) | `findings/*.json` status reproduced/confirmed, critical classes only | chain & escalate the proven primitive to max impact; defeat sanitizers/quoting; verify each step | updates findings' `exploit` object (honest `constraints`); `report/<id>/exploit.py` |
 
 ## Convergence (C) loop - per finding
 

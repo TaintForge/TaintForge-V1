@@ -42,7 +42,7 @@ workflow-by-workflow walkthrough, see **[DOCS.md](DOCS.md)**.
 
 ## How it works
 
-TaintForge runs as **three parallel autonomous Codex sessions** that share the findings
+TaintForge runs as **four parallel autonomous Codex sessions** that share the findings
 queue (`workspace/findings/`) — a streaming producer-consumer (watch them live in the
 `start.sh` tmux dashboard):
 
@@ -52,18 +52,25 @@ queue (`workspace/findings/`) — a streaming producer-consumer (watch them live
 - **B — producer (logic / access-control):** IDOR/BOLA, missing authorization, privilege
   escalation, auth/session bypass, business-logic flaws. The bugs SAST tools can't see.
 - **C — consumer (convergence):** cross-validates statically, reproduces dynamically
-  against a live instance (session-aware `probe.py` + out-of-band SSRF `canary.py`),
-  web-searches whether each reproduced bug is a known CVE or **novel (potential 0-day)**,
-  writes a runnable `poc.py` per vuln, then triages/ranks — looping while A and B work.
+  against a live instance (session-aware `probe.py`, out-of-band SSRF `canary.py`, and
+  headless-browser XSS *execution* proof `browser_probe.py`), web-searches whether each
+  reproduced bug is a known CVE or **novel (potential 0-day)**, writes a runnable `poc.py`
+  per vuln, then triages/ranks — looping while A and B work.
+- **D — exploitation:** takes only the genuinely critical findings C already proved
+  (RCE, SQLi, command injection, auth bypass, deserialization, SSRF-to-internal) and pushes
+  the PoC into a fully understood, weaponized exploit — chaining, escalating impact, and
+  defeating sanitizers/quoting — recording the result (and an honest statement of any
+  bounds) in the finding's `exploit` object plus a standalone `exploit.py`.
 
 Each session is **one long, self-driving session** — it reads code, finds, records, and
 digs deeper on its own. The shell never re-invokes an agent per module (which would reset
 its memory). But a `codex exec` session is finite — it ends when the agent decides it's
 done or hits a token limit — so each role runs under a **shell supervisor that respawns it**
 on exit until a deadline (`MAX_HOURS`, default 12h) or a `workspace/_stop` flag. That's what
-keeps C alive to consume findings that arrive late. `write_finding.py` is file-locked, so
-the three sessions never corrupt the same finding. A and B produce concurrently; C consumes
-as findings appear; failed reproductions route back as `needs_reanalysis` (feedback loop).
+keeps C and D alive to consume findings that arrive late. `write_finding.py` is file-locked,
+so the four sessions never corrupt the same finding. A and B produce concurrently; C consumes
+as findings appear; D weaponizes the critical ones C proves; failed reproductions route back
+as `needs_reanalysis` (feedback loop).
 
 Status lifecycle of a finding:
 ```
@@ -77,8 +84,8 @@ candidate ──> cross_validated ──> reproduced ──> confirmed
 
 ```
 taintforge/                         ← repo root (run from here)
-  start.sh                          ← tmux launcher: 4-pane live dashboard (A | B | C | stats)
-  audit.sh                          ← engine: seeds + spawns the 3 parallel sessions
+  start.sh                          ← tmux launcher: 5-pane live dashboard (A | B / C | D / stats)
+  audit.sh                          ← engine: seeds + spawns the 4 parallel sessions
   accounts.json[.example]           ← test accounts for dynamic auth/IDOR testing
   fix_skills.py                     ← repairs SKILL.md YAML frontmatter if Codex can't load
   AGENTS.md                         ← operating contract Codex reads first
@@ -119,8 +126,15 @@ taintforge/                         ← repo root (run from here)
   `permission_model`, `user_journeys`, `trust_boundaries` — the understanding that logic-bug
   hunting (Track B) depends on.
 
-`coverage.py` splits a large codebase into **modules** (vendor/tests excluded; big dirs
-split) so the agents cover everything in bounded chunks rather than skimming once.
+`coverage.py` models a large codebase as a **hierarchical tree (directory → module → entry
+point)** rather than a flat list (vendor/tests excluded; big dirs split via
+`TF_SPLIT_THRESHOLD`/`TF_MAX_DEPTH`). Each module is annotated with the **entry points**
+(routes/handlers) it exposes, pulled from the Code Model — so coverage tracks *reachable
+attack surface*, not just files on disk. `--next` hands out pending modules **attack-surface
+first** (those exposing routes before leaf libraries), `--tree` prints the tree with per-node
+status, and `--summary` separately reports how much of the entry-point surface is analyzed.
+This makes "100% coverage" mean "every reachable route was traced inward," not "every file
+was skimmed."
 
 Vulnerabilities live on **flows across files**, not single lines. The call graph is the map
 both vuln tracks use to follow them, queried with `callgraph.py`:
@@ -170,8 +184,9 @@ If Codex logs `failed to load skill ... YAML frontmatter`, run `python3 fix_skil
 ./start.sh targets/<app>                              # static only, with dashboard
 ```
 
-`start.sh` opens a **tmux 4-pane live view** — 🅐 inject | 🅑 logic | 🅒 converge and a
-dashboard pane (coverage bar, findings by status/class, latest hits, elapsed time). Detach
+`start.sh` opens a **tmux 5-pane live view** — 🅐 inject | 🅑 logic / 🅒 converge | 🅓 exploit
+and a dashboard pane (coverage bar, findings by status/class, novel + 💥 exploit counters,
+latest hits, elapsed time). Detach
 with `Ctrl-b` then `d` (sessions keep running); re-attach with `tmux attach -t taintforge`.
 Stop everything (the `_stop` flag must come first, or supervisors respawn):
 `touch workspace/_stop; kill $(cat workspace/_pids); pkill -f 'codex exec'; tmux kill-session -t taintforge`.
@@ -193,8 +208,8 @@ rather than guessed. Accounts are copied to `workspace/_accounts.json`; requests
 go to the URL you pass.
 
 Runs with `--sandbox workspace-write` (writes `workspace/`, `targets/` stays read-only).
-Three concurrent sessions ≈ 3× tokens. Dynamic reproduction and disclosure search need the
-sandbox's **network** and **web search** enabled, so use a `CODEX_CMD` like:
+Four concurrent sessions ≈ 4× tokens. Dynamic reproduction, exploitation, and disclosure
+search need the sandbox's **network** and **web search** enabled, so use a `CODEX_CMD` like:
 ```bash
 CODEX_CMD="codex exec --sandbox workspace-write \
   --config sandbox_workspace_write.network_access=true \
@@ -258,7 +273,22 @@ Per-vuln reports are kept separate (never merged); `report.md` stays as the rank
 The dashboard regenerates `report.md` and the per-vuln folders every few seconds, so they're
 never stale.
 
-## Design principles
+## Weaponized exploitation (agent D)
+
+For the genuinely critical reproduced findings (RCE, SQLi, command injection, auth bypass,
+deserialization, SSRF-to-internal), agent **D** goes beyond a proof-of-concept: starting from
+the proven primitive it chains and escalates to the highest real impact, and where a
+sanitizer/escape/quoting blocks the obvious payload it analyzes exactly what survives and
+finds a working bypass — verifying each step against the live target (or, with no live
+target, against the code plus a local shell model of the sink). The result is recorded in the
+finding's **`exploit`** object — `{depth: shallow|chained|weaponized, primitive, max_impact,
+steps, mitigations_bypassed, constraints, oob_evidence}` — and materialized as a standalone
+`workspace/report/<id>/exploit.py`, separate from C's `poc.py`. D records **honest bounds**:
+if the impact is limited (e.g. only argument-less single-token commands run), it says so
+precisely rather than overstating. D and its outputs are for assets you own or are authorized
+to test — it never targets a host it wasn't pointed at.
+
+
 
 - **The agent finds; tools assist.** Every finding is authored by Codex via
   `write_finding.py`. Semgrep/OpenGrep/CodeQL only hand it leads or cross-checks — a SAST

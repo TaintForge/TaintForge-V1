@@ -44,6 +44,18 @@ def finding_md(f):
     if r.get("response"): L.append(f"- response evidence: {r['response']}")
     if r.get("poc"):
         L += ["", "Recorded request(s):", "```http", str(r["poc"]).strip(), "```"]
+    ex = f.get("exploit", {}) or {}
+    if ex.get("depth"):
+        L += ["", "## Exploitation", "",
+              f"- **depth**: {ex.get('depth')}  ",
+              f"- **primitive**: {ex.get('primitive','?')}  ",
+              f"- **max impact**: {ex.get('max_impact','?')}  "]
+        if ex.get("steps"): L += ["- steps:"] + [f"  {i+1}. {s}" for i,s in enumerate(ex["steps"])]
+        if ex.get("mitigations_bypassed"): L.append("- mitigations bypassed: " + "; ".join(ex["mitigations_bypassed"]))
+        if ex.get("constraints"): L.append("- constraints (honest bounds): " + "; ".join(ex["constraints"]))
+        if ex.get("oob_evidence"): L.append(f"- OOB evidence: {ex['oob_evidence']}")
+        if ex.get("working_poc","").strip():
+            L += ["", "Run the weaponized exploit:", "```bash", "python3 exploit.py", "```"]
     L += ["", "## Run the PoC", "```bash", "pip install requests   # if needed", "python3 poc.py", "```",
           "", f"_generated {datetime.datetime.now(datetime.timezone.utc).isoformat()}_"]
     return "\n".join(L)
@@ -67,6 +79,9 @@ def main():
             open(os.path.join(d, "poc.py"), "w").write(
                 STUB.format(id=fid, vuln_class=f.get("vuln_class","?")))
         open(os.path.join(d, "finding.md"), "w").write(finding_md(f))
+        ex = (f.get("exploit", {}) or {}).get("working_poc")
+        if ex and ex.strip():
+            open(os.path.join(d, "exploit.py"), "w").write(ex)
         n += 1
     print(f"[emit_poc] wrote {n} per-vuln folder(s) under {a.out}/<id>/ (poc.py + finding.md)")
 
