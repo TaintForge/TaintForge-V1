@@ -34,9 +34,19 @@ S=".agents/skills"
 CODEX_CMD="${CODEX_CMD:-codex exec --sandbox workspace-write}"
 mkdir -p workspace/findings workspace/hints workspace/report
 
-echo "== seed (no LLM): structural model + module split =="
+echo "== seed (no LLM): structural model + module split + domain hypotheses =="
+[ -f .env ] && set -a && . ./.env && set +a   # load SSRF_HOST/PORT, CWE_XML if present
 "$S/source-model/scripts/build_code_model.sh" "$TARGET" || true
 python3 "$S/source-model/scripts/coverage.py" --init "$TARGET" || true
+# auto-merge CWE-derived hypotheses once (if CWE_XML points at a real file and not merged yet)
+CAT="$S/hypothesize/scripts/catalog.json"
+if [ -n "${CWE_XML:-}" ] && [ -f "$CWE_XML" ]; then
+  if ! grep -q "\"source_file\": \"$(basename "$CWE_XML")\"" "$CAT" 2>/dev/null; then
+    echo "== merging CWE hypotheses from $CWE_XML (one-time) =="
+    python3 "$S/hypothesize/scripts/cwe_to_hypotheses.py" "$CWE_XML" --catalog "$CAT" || true
+  fi
+fi
+python3 "$S/hypothesize/scripts/gen_hypotheses.py" --target "$TARGET" || true
 
 # ---- live-target / accounts context (only if --url given) ----
 DYN=""; ACCT_NOTE=""
@@ -55,9 +65,8 @@ session to prove (or disprove) IDOR/authz bugs."
 unauthenticated, and note where authenticated testing is needed."
   fi
   # out-of-band canary for SSRF/blind confirmation.
-  # .env can set SSRF_HOST/SSRF_PORT so callbacks use an externally-reachable address the
-  # target (often in its own container/network) can actually reach - 127.0.0.1 usually can't.
-  [ -f .env ] && set -a && . ./.env && set +a
+  # SSRF_HOST/SSRF_PORT come from .env (loaded in the seed step) so callbacks use an
+  # externally-reachable address the target (often in its own container/network) can reach.
   CANARY_PORT="${SSRF_PORT:-${CANARY_PORT:-9111}}"
   CANARY_HOST="${SSRF_HOST:-${CANARY_HOST:-127.0.0.1}}"
   python3 "$S/convergence/scripts/canary.py" serve --port "$CANARY_PORT" \
@@ -93,6 +102,10 @@ shows each module's entry points (the routes an attacker can actually reach). An
 module, but start from those with entry points and trace inward from each route. For each
 module either record a finding or justify why it's safe, then coverage.py --done <module>.
 You don't get tired - keep going until repeated passes find nothing new.
+Also read workspace/HYPOTHESES.json: for each open hypothesis verify it against the code; if
+confirmed, write a finding and set its hypothesis_id, then mark the hypothesis verified; if
+disproved, mark it refuted with a one-line reason. These are intent-level (business-logic)
+attacks to check alongside your pattern scan.
 $DYN"
 
 MISSION_A="You are PRODUCER A of a white-box security assessment. Focus ONLY on
@@ -145,7 +158,9 @@ confirm, set status needs_reanalysis with reasoning. $COMMON"
 
 MISSION_C="You are the CONSUMER (convergence). Producers A and B run in PARALLEL and stream
 findings into workspace/findings/. Do NOT wait for them. Loop continuously: pick
-candidate/cross_validated findings (highest severity first), then
+candidate/cross_validated findings (highest severity first; prefer findings that carry a
+hypothesis_id - they validate an intent-level business-logic attack from HYPOTHESES.json),
+then
 1) cross-validate: .agents/skills/convergence/scripts/cross_validate.sh $TARGET (PHP falls
    back to OpenGrep; correlate bumps matches to cross_validated),
 2) reproduce dynamically (only if a live URL is provided) with

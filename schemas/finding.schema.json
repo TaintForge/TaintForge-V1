@@ -304,6 +304,10 @@
           "type": "string"
         }
       }
+    },
+    "hypothesis_id": {
+      "type": "string",
+      "description": "id of the HYPOTHESES.json hypothesis this finding validates, if any"
     }
   }
 }

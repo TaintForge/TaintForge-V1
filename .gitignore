@@ -3,6 +3,8 @@ targets/
 
 workspace/
 
+.workspace-backup/
+
 __pycache__/
 
 *.pyc

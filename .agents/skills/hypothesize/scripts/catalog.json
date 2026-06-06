@@ -1,0 +1,51 @@
+{
+  "_comment": "Domain-specific business-logic vulnerability hypotheses. The hypothesize step picks the matching domain(s) and seeds these as candidate hypotheses, then the LLM adds service-specific ones. Each producer/consumer treats these as things to VERIFY against the code, not as confirmed findings.",
+  "domains": {
+    "finance": {
+      "aliases": ["bank","banking","payment","wallet","fintech","trading","exchange","ledger","billing"],
+      "flows": ["account funding","transfer","withdrawal","balance check","currency/fx conversion","interest/fee calc","refund/chargeback","statement/export"],
+      "hypotheses": [
+        {"class":"business-logic","name":"negative or zero amount","why":"amount fields that accept <=0 can reverse a transfer or mint value","check_how":"find transfer/withdraw/charge handlers; check amount is validated > 0 server-side, not just client"},
+        {"class":"business-logic","name":"double-spend / race on balance","why":"concurrent withdrawals reading the same balance before either commits","check_how":"check balance debit is atomic (row lock / SELECT FOR UPDATE / compare-and-set), not read-then-write"},
+        {"class":"business-logic","name":"limit / balance bypass","why":"overdraft or limit enforced on a stale or client-supplied value","check_how":"trace where the available balance/limit is read vs where the debit is applied; look for TOCTOU"},
+        {"class":"business-logic","name":"rounding / fx ordering","why":"rounding before vs after fx, or truncation, leaks fractional value repeatedly","check_how":"inspect order of multiply/convert/round in fee and fx code paths"},
+        {"class":"business-logic","name":"idempotency / replay","why":"replaying a transfer request without an idempotency key duplicates it","check_how":"check transfer/charge endpoints require and enforce a unique idempotency key"},
+        {"class":"broken-access-control","name":"cross-account operation","why":"acting on another user's account/transaction id (IDOR on money)","check_how":"every account/txn lookup must scope to the authenticated owner"}
+      ]
+    },
+    "vcs": {
+      "aliases": ["git","gitlab","github","gitea","version control","repository","ci/cd","devops","source control"],
+      "flows": ["auth/token","repo read/write","branch protection","merge request/PR","CI pipeline","runner execution","webhook","fork"],
+      "hypotheses": [
+        {"class":"broken-access-control","name":"protected branch bypass","why":"push/merge path that skips the protected-branch / approval gate","check_how":"trace push and merge handlers; confirm protected-branch and required-approval checks are enforced server-side on every path"},
+        {"class":"privilege-escalation","name":"fork MR secret/variable theft","why":"a pipeline triggered from a fork MR running with target-project CI variables/secrets","check_how":"check whether fork-originated pipelines get protected CI variables or run in the parent context"},
+        {"class":"business-logic","name":"self-approval of own MR","why":"author approving their own merge request defeats review control","check_how":"verify approval logic excludes the MR author / commit author"},
+        {"class":"privilege-escalation","name":"token / scope escalation","why":"a low-scope token reaching higher-scope actions","check_how":"map token scopes to the actions each route allows; look for missing scope checks"},
+        {"class":"command-injection","name":"CI/runner command construction","why":"user-influenced strings interpolated into shell/CI scripts run on a runner","check_how":"trace user input into pipeline/job script assembly and runner execution"},
+        {"class":"ssrf","name":"webhook / import URL SSRF","why":"server fetches a user-supplied URL (webhook test, repo import, mirror)","check_how":"find URL-fetching features; check allow-list / internal-range blocking, and DNS-rebinding handling"}
+      ]
+    },
+    "community": {
+      "aliases": ["forum","social","community","cms","blog","comment","messaging","chat","content"],
+      "flows": ["signup/auth","post/comment create-edit-delete","block/mute","report/moderation","vote/like","follow","direct message","search"],
+      "hypotheses": [
+        {"class":"broken-access-control","name":"block / mute bypass","why":"a blocked user still reaching the blocker via an alternate route (mention, DM, API)","check_how":"check every interaction path (DM, mention, follow, api) re-checks the block relationship"},
+        {"class":"information-disclosure","name":"deleted/private content exposure","why":"soft-deleted or private posts still served via cache, API, search, or edit history","check_how":"trace read paths (api, search index, cache, revisions) for the visibility/deleted check"},
+        {"class":"business-logic","name":"vote/like manipulation","why":"vote not deduplicated per-user or accepts repeated/forged casts","check_how":"check vote endpoint enforces one-per-user server-side and authorizes the actor"},
+        {"class":"broken-access-control","name":"moderation/report bypass","why":"acting on or viewing reports without moderator role","check_how":"verify moderation routes require a moderator/admin role, not just authentication"},
+        {"class":"idor","name":"edit/delete others' content","why":"post/comment id acted on without ownership check","check_how":"every edit/delete must verify the actor owns the target resource"}
+      ]
+    },
+    "generic": {
+      "aliases": ["*"],
+      "flows": ["auth","resource CRUD","admin","settings","file upload","export"],
+      "hypotheses": [
+        {"class":"idor","name":"object reference without ownership","why":"resource fetched by id with no owner/tenant scope","check_how":"every id lookup reachable from a route must scope to the authenticated principal"},
+        {"class":"broken-access-control","name":"missing authorization on state change","why":"create/update/delete reachable without a role/permission check","check_how":"trace each mutating route to its authz gate; flag if none"},
+        {"class":"privilege-escalation","name":"role/permission self-grant","why":"a user setting their own role/permission fields via mass-assignment","check_how":"check role/permission attributes are not settable from user-controlled params"},
+        {"class":"business-logic","name":"state-machine violation","why":"reaching a later state without the required prior transition (e.g. pay-skip)","check_how":"map the intended state transitions; check each transition enforces its precondition"},
+        {"class":"business-logic","name":"race condition on shared resource","why":"check-then-act on a shared counter/quota/balance without locking","check_how":"look for read-modify-write on shared state without atomicity"}
+      ]
+    }
+  }
+}
