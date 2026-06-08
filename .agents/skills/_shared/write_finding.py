@@ -36,6 +36,10 @@ def main():
     f.setdefault("track", "B")
     f.setdefault("detector", "llm-track-b" if f["track"] == "B" else "llm-track-a")
     f.setdefault("status", "candidate")
+    # retry cap: count how many times this finding is bounced to needs_reanalysis, so C can
+    # stop re-verifying it forever (burns reasoning tokens). Incremented on each such update.
+    if f.get("status") == "needs_reanalysis":
+        f["reanalysis_count"] = int(f.get("reanalysis_count", 0)) + 1
     f.setdefault("sanitizers_seen", [])
     f.setdefault("flow", [])
     sink = f.get("sink") or {}

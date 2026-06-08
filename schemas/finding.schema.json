@@ -308,6 +308,10 @@
     "hypothesis_id": {
       "type": "string",
       "description": "id of the HYPOTHESES.json hypothesis this finding validates, if any"
+    },
+    "reanalysis_count": {
+      "type": "integer",
+      "description": "how many times this finding bounced to needs_reanalysis; capped so it isn't re-verified forever"
     }
   }
 }

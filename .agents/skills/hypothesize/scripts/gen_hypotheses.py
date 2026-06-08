@@ -79,12 +79,25 @@ def main():
         hyps.append({"id":f"H{hid:03d}","domain":"_universal","source":"catalog",
                      "class":h["class"],"name":h["name"],"why":h["why"],
                      "check_how":h["check_how"],"target_endpoints":[],"status":"open"})
-    # CWE-derived pool (hundreds), if cwe_to_hypotheses.py was run
+    # CWE-derived pool (hundreds), if cwe_to_hypotheses.py was run.
+    # Cap it so producers don't drown: keep domain+universal in full (they're curated &
+    # high-signal), then add CWE-derived up to TF_MAX_HYP total, balanced per class so no
+    # single class crowds out the rest. Tune with TF_MAX_HYP / TF_MAX_PER_CLASS.
+    MAX_HYP=int(os.environ.get("TF_MAX_HYP","120"))
+    MAX_PER_CLASS=int(os.environ.get("TF_MAX_PER_CLASS","0")) or None  # 0 = no per-class cap
     cwe=catalog.get("_cwe_derived",{})
-    for h in cwe.get("hypotheses", []):
+    cwe_h=cwe.get("hypotheses", [])
+    per_class={}
+    for h in cwe_h:
+        if len(hyps) >= MAX_HYP: break
+        cls=h["class"]
+        if MAX_PER_CLASS and per_class.get(cls,0) >= MAX_PER_CLASS: continue
+        per_class[cls]=per_class.get(cls,0)+1
         hyps.append({"id":h["id"],"domain":"_cwe","source":"cwe","cwe_id":h.get("cwe_id"),
                      "class":h["class"],"name":h["name"],"why":h["why"],
                      "check_how":h["check_how"],"target_endpoints":[],"status":"open"})
+    cwe_total=len(cwe_h)
+    cwe_used=sum(1 for h in hyps if h["source"]=="cwe")
     data={
         "target": a.target,
         "domain": domain,

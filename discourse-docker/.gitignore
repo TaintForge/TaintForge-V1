@@ -1,0 +1,17 @@
+
+targets/
+
+workspace/
+
+.workspace-backup/
+
+__pycache__/
+
+*.pyc
+
+.venv/
+
+accounts.json
+
+*.jar
+

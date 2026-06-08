@@ -32,6 +32,9 @@ done
 
 S=".agents/skills"
 CODEX_CMD="${CODEX_CMD:-codex exec --sandbox workspace-write}"
+# Consumer C does reproduction/cross-validation/PoC - the reasoning-heavy role - so default it
+# to gpt-5.4. Override via .env or env (CODEX_CMD_C=...); falls back to CODEX_CMD if you blank it.
+CODEX_CMD_C="${CODEX_CMD_C:-codex exec --sandbox workspace-write --config sandbox_workspace_write.network_access=true --config web_search=live --model gpt-5.4}"
 mkdir -p workspace/findings workspace/hints workspace/report
 
 echo "== seed (no LLM): structural model + module split + domain hypotheses =="
@@ -176,7 +179,12 @@ then
    exact reproducing command(s) in repro.poc (full probe.py/curl line with payload, headers,
    --jar - copy-pasteable) and the decisive response in repro.response; for IDOR include
    both identities' requests. If the live test is inconclusive,
-   set needs_reanalysis (not stuck candidate),
+   set needs_reanalysis (not stuck candidate), with a one-line reason in repro.observation.
+   RETRY CAP: a finding already at reanalysis_count >= 3 (env TF_MAX_REANALYSIS) that you
+   still cannot reproduce - do NOT bounce it again; close it as false_positive with a note
+   that it stayed inconclusive after repeated tries (this stops endless re-verification that
+   burns tokens). Only keep retrying it if NEW evidence (seeded data, license, account) made
+   the surface testable since last attempt.
 3) for any finding you just moved to reproduced/confirmed, WEB-SEARCH whether it is already
    public: query the target product+version+vuln specifics against CVE/NVD, vendor and
    GitHub security advisories, changelogs. Set disclosure{status: novel|known|inconclusive,
@@ -244,12 +252,17 @@ rm -f workspace/_stop
 # dies while findings are still coming). So each role runs under a supervisor that RESPAWNS
 # it whenever it exits, until MAX_HOURS or workspace/_stop. Logs are appended across restarts.
 supervise(){ # $1=tag $2=logfile $3=mission  -> echoes supervisor pid
+  # per-role model override: CODEX_CMD_<TAG> (e.g. CODEX_CMD_C) wins over the shared CODEX_CMD,
+  # so you can run, say, C on a different model. Falls back to CODEX_CMD when unset.
+  eval "rolecmd=\${CODEX_CMD_$1:-\$CODEX_CMD}"
   ( n=0
     while [ ! -f workspace/_stop ] && [ "$(date +%s)" -lt "$DEADLINE" ]; do
         n=$((n+1))
-        echo "===== [$(date +%H:%M:%S)] session $1 start #$n =====" >> "$2"
-        $CODEX_CMD "$3" >> "$2" 2>&1 </dev/null
+        echo "===== [$(date +%H:%M:%S)] session $1 start #$n ($rolecmd) =====" >> "$2"
+        $rolecmd "$3" >> "$2" 2>&1 </dev/null
         echo "===== [$(date +%H:%M:%S)] session $1 exited (#$n); respawn in 5s =====" >> "$2"
+        # token budget guard: touches workspace/_stop if cumulative usage over TF_TOKEN_BUDGET
+        python3 "$S/_shared/budget_guard.py" --check >> "$2" 2>&1 || true
         sleep 5
     done
     echo "===== [$(date +%H:%M:%S)] session $1 supervisor stopped =====" >> "$2"
