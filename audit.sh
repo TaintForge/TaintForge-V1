@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
-# Streaming producer-consumer: three parallel autonomous Codex sessions sharing the
+# Streaming producer-consumer: four parallel autonomous Codex sessions sharing the
 # findings queue (workspace/findings/).
 #   A (producer) - injection / data-flow
 #   B (producer) - logic / access-control (IDOR, authz, ...)
 #   C (consumer) - cross-validate + reproduce + triage, continuously
+#   D (exploitation) - weaponize the critical findings C already proved
 # Each is ONE long self-looping session (no shell re-invoking Codex per module).
-# write_finding.py is file-locked so the three never corrupt the same finding.
+# write_finding.py is file-locked so the four never corrupt the same finding.
 #
 # Usage:
 #   ./audit.sh targets/<app>                         # static only (no live server)
@@ -39,6 +40,10 @@ mkdir -p workspace/findings workspace/hints workspace/report
 
 echo "== seed (no LLM): structural model + module split + domain hypotheses =="
 [ -f .env ] && set -a && . ./.env && set +a   # load SSRF_HOST/PORT, CWE_XML if present
+# Global index: symbols + call graph + entry points over the WHOLE repo, WITHOUT the
+# dataflow/proof_ledger path enumeration (which blows a big app like GitLab up to GB-scale and
+# OOMs). Huge repos auto-fall back to graph-only; small ones still get the full set here.
+# A/B then build the FULL model per coverage module (see missions) for deep path/proof work.
 "$S/source-model/scripts/build_code_model.sh" "$TARGET" || true
 python3 "$S/source-model/scripts/coverage.py" --init "$TARGET" || true
 # auto-merge CWE-derived hypotheses once (if CWE_XML points at a real file and not merged yet)
@@ -104,6 +109,18 @@ module ATTACK-SURFACE FIRST (modules exposing routes/handlers before leaf librar
 shows each module's entry points (the routes an attacker can actually reach). Analyze every
 module, but start from those with entry points and trace inward from each route. For each
 module either record a finding or justify why it's safe, then coverage.py --done <module>.
+The repo-wide CODE_MODEL.json may be a GRAPH-ONLY global index (symbols + entry points; edges
+split to call_graph.json, no dataflow/proof_ledger) when the target is large - check stats.mode.
+Whole-repo graph queries (--sinks/--trace/--forward) intentionally won't work on it (they'd OOM
+on a big repo). To analyze a module, build the FULL model SCOPED to that module:
+  python3 .agents/skills/source-model/scripts/build_code_model.py <module_path> -o workspace/cm/<m>.json
+That writes module-scoped artifacts next to it (workspace/cm/<m>.dataflow.json,
+workspace/cm/<m>.proof_ledger.json, etc - prefixed so they don't clobber the global ones).
+Then query that module model:
+  python3 .agents/skills/source-model/scripts/callgraph.py --model workspace/cm/<m>.json --sinks|--trace|--forward
+  python3 .agents/skills/source-model/scripts/proof_ledger.py --ledger workspace/cm/<m>.proof_ledger.json --next sink
+The global index is for resolving cross-module calls and locating entry points; the per-module
+full build is where you do deep path/sink/proof work.
 You don't get tired - keep going until repeated passes find nothing new.
 Also read workspace/HYPOTHESES.json: for each open hypothesis verify it against the code; if
 confirmed, write a finding and set its hypothesis_id, then mark the hypothesis verified; if
@@ -117,19 +134,23 @@ path traversal, file inclusion, deserialization, XXE, SSTI, NoSQL, open redirect
 
 VULNERABILITIES LIVE ON FLOWS ACROSS FILES, not in one line. Work sink-first and trace
 backward across function/file/module boundaries - a call that looks safe in one file is
-often fed tainted input three calls away. Use the call graph in
-workspace/CODE_MODEL.json (structural.call_graph) via the helper:
-  python3 .agents/skills/source-model/scripts/callgraph.py --stats
-  python3 .agents/skills/source-model/scripts/callgraph.py --callers <sinkOrFunc>   # who calls it
-  python3 .agents/skills/source-model/scripts/callgraph.py --trace   <sinkOrFunc>   # backward paths
+often fed tainted input several calls away. The whole-repo CODE_MODEL.json is a GRAPH-ONLY
+index on a big target (no inline edges), so build the FULL model for the MODULE you are
+analyzing (from coverage.py --next) and query THAT:
+  python3 .agents/skills/source-model/scripts/build_code_model.py <module_path> -o workspace/cm/<m>.json
+  python3 .agents/skills/source-model/scripts/callgraph.py --model workspace/cm/<m>.json --sinks
+  python3 .agents/skills/source-model/scripts/callgraph.py --model workspace/cm/<m>.json --callers <sinkOrFunc>
+  python3 .agents/skills/source-model/scripts/callgraph.py --model workspace/cm/<m>.json --trace <sinkOrFunc> -d 8
 For each dangerous sink (query/exec/system/unserialize/include/eval/file_get_contents/...)
 list its callers, follow the chain back until you reach attacker-controlled input
 (\$_GET/\$_POST/headers/route vars), and judge sanitizers along the WHOLE path. Do NOT mark
 a sink safe by looking at its file alone - check the callers.
 
-The call graph is coarse and cannot see language-construct sinks used directly on input
-(e.g. include \$_GET['p'], echo \$input, eval of a request value). Find those by READING the
-code too; the graph is a starting map, not the whole territory.
+The graph is a function/method-level skeleton, not a taint proof, and the default sink set is
+high-signal only (sql/command/code-eval/deserialization/file-path/ssrf-net/redirect). Find
+language-construct sinks used directly on input (include \$_GET['p'], echo \$input, eval of a
+request value) and output/resource-load sinks by READING the code too - the graph is a
+starting map, not the whole territory.
 
 Use the vuln-track-a skill. Optionally pull leads with
 .agents/skills/vuln-track-a/scripts/run_semgrep.sh $TARGET (hints only). When a live URL is
@@ -142,10 +163,13 @@ privilege escalation, authentication/session bypass, and business-logic flaws
 (step-skipping, price/quantity tampering, mass assignment, race conditions).
 
 ACCESS-CONTROL BUGS LIVE ON THE PATH FROM AN ENTRY POINT TO A RESOURCE ACCESS. Trace that
-path and check whether an authorization GATE exists ANYWHERE on it. Use the call graph in
-workspace/CODE_MODEL.json via:
-  python3 .agents/skills/source-model/scripts/callgraph.py --callees <handlerFile>  # what a route handler calls
-  python3 .agents/skills/source-model/scripts/callgraph.py --callers <loaderOrFindFn>  # who reaches a resource load
+path and check whether an authorization GATE exists ANYWHERE on it. The whole-repo
+CODE_MODEL.json is a GRAPH-ONLY index on a big target, so build the FULL model for the MODULE
+you are analyzing (from coverage.py --next) and query THAT:
+  python3 .agents/skills/source-model/scripts/build_code_model.py <module_path> -o workspace/cm/<m>.json
+  python3 .agents/skills/source-model/scripts/callgraph.py --model workspace/cm/<m>.json --entries
+  python3 .agents/skills/source-model/scripts/callgraph.py --model workspace/cm/<m>.json --forward <handler_symbol> -d 8
+  python3 .agents/skills/source-model/scripts/callgraph.py --model workspace/cm/<m>.json --callers <loaderOrFindFn>
 For each route/action in workspace/_authz_matrix.json and CODE_MODEL comprehension.route_map:
 follow handler -> service -> repository/object-load, and ask along the WHOLE chain: is there
 an authn check, a role/permission check, and an OWNERSHIP/tenant check on the requested
@@ -285,5 +309,5 @@ fi
 
 echo "  python3 $S/convergence/scripts/queue.py --counts   # watch the queue"
 trap 'echo; echo "stopping..."; stop_all' INT TERM
-wait $PA $PB $PC
+wait $PA $PB $PC $PD
 echo "== run ended (deadline/stop) -> workspace/report/report.md =="

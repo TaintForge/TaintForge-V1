@@ -17,7 +17,7 @@ workflow-by-workflow walkthrough, see **[DOCS.md](DOCS.md)**.
         └───────────────────────────┬──────────────────────────────────┘
                                     │
         ┌───────────────────────────▼──────────────────────────────────┐
-        │ SEED (no LLM)   tree-sitter structural model + module split   │
+        │ SEED (no LLM)   ast+regex structural model + module split   │
         │                 → workspace/CODE_MODEL.json, coverage.json     │
         └───────────────┬───────────────────────────┬──────────────────┘
                         │                            │      (shared findings queue)
@@ -118,7 +118,7 @@ taintforge/                         ← repo root (run from here)
 ## The Code Model
 
 `source-model` builds `workspace/CODE_MODEL.json` once, reused by everything:
-- **`structural`** (tool, tree-sitter + regex backstop): files, entry points, and a
+- **`structural`** (tool, ast + regex extractors): files, entry points, and a
   **call graph** (`caller -> callee` edges, including call sites of dangerous built-ins like
   `query`/`exec`/`system`/`unserialize`/`include`/`require`/`eval`/`file_get_contents`
   tagged `<builtin-sink>`). This is what lets the agents follow flows ACROSS files.
@@ -153,7 +153,7 @@ the thousands for a large app — `0` means the structural build failed.
 
 ## Tooling (hints & cross-check only — never the author of a finding)
 
-- **tree-sitter** — language-agnostic AST / call graph for the Code Model.
+- **ast + regex extractors** — language-agnostic symbol/call-graph extraction for the Code Model (ast for python, regex for others; no required deps).
 - **Semgrep / OpenGrep** — Track A leads + Track A-style cross-validation. OpenGrep is
   preferred: free for private code, restored cross-file taint, and a more stable core
   (Semgrep OSS can segfault on very large repos).
@@ -166,7 +166,7 @@ the thousands for a large app — `0` means the structural build failed.
 ```bash
 cd <repo>
 python3 -m venv .venv && . .venv/bin/activate
-pip install jsonschema tree-sitter-language-pack pyyaml
+pip install jsonschema pyyaml
 # OpenGrep (preferred SAST engine):
 curl -fsSL https://raw.githubusercontent.com/opengrep/opengrep/main/install.sh | bash
 export PATH="$HOME/.opengrep/cli/latest:$PATH"

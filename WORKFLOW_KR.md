@@ -37,13 +37,13 @@ AI 에이전트(Codex) 기반 화이트박스 보안 분석 파이프라인의 �
 
 분석 시작 전에 **툴이 결정론적으로 코드 지도를 만듦**. 이건 판단이 아니라 사실 추출이므로 LLM을 안 쓰고 한 번만 함. 산출물은 두 개: `workspace/CODE_MODEL.json`(구조 지도)와 `workspace/coverage.json`(공격표면 트리).
 
-### 1-1. AST 파싱 — tree-sitter로 구조 추출
+### 1-1. AST 파싱 — ast(파이썬)+정규식으로 구조 추출
 
-소스를 정규식으로 긁는 게 아니라 **tree-sitter로 진짜 AST(추상 구문 트리)를 만들어** 구조를 뽑음. 언어별 문법(PHP/JS/TS/Python/Ruby/Go/Java...)을 로드해서 파싱하고, AST 노드 타입으로 의미를 구분함:
+파이썬은 표준 `ast` 모듈로 진짜 AST를 만들어 정확히 뽑고, 그 외 언어(PHP/JS/TS/Ruby/Go/Java...)는 언어별 정규식 추출기로 함수·클래스·호출을 뽑음. (tree-sitter는 나중에 끼울 수 있게 출력 형태를 맞춰뒀지만 현재 의존성은 없음.)
 
 - **함수·메서드 정의** — 언어마다 노드 타입이 다름. PHP `function_definition`·`method_declaration`, JS `function_declaration`·`method_definition`, Ruby `method`·`singleton_method` 등. 각 정의에서 이름·시작줄을 뽑아 "이 파일에 어떤 함수가 있다"를 기록.
 - **호출(call)** — `foo()`, `obj.bar()`, `Klass.baz` 모두 호출 노드. 호출자(어느 함수 안에서)와 피호출자(무슨 이름) 쌍을 뽑음.
-- **tree-sitter가 없거나 깨지면 정규식 백스톱**으로 떨어짐(품질은 낮지만 0이 되진 않게). 로그에 `ts=on` / `regex-fallback`으로 어느 모드였는지 남김.
+- 파이썬 `ast` 파싱이 실패하면(문법 오류 등) 정규식 추출기로 떨어져서 0이 되진 않게 함.
 
 **왜 AST냐**: 정규식은 `function`이라는 단어는 잡아도 "이게 정의인지, 문자열 안인지, 주석인지"를 구분 못 함. AST는 문법적으로 정확해서 — 주석·문자열·중첩을 헷갈리지 않고 진짜 정의/호출만 뽑음. 콜그래프 정확도가 여기서 갈림.
 

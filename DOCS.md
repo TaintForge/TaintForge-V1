@@ -14,8 +14,8 @@ This document explains every component and every workflow in depth. For a quick 
 
 ## 1. Architecture in one paragraph
 
-TaintForge seeds a structural model of the target (tree-sitter call graph + module split),
-then runs **three Codex sessions in parallel**. Two are producers — **A** hunts injection /
+TaintForge seeds a structural model of the target (ast+regex call graph + module split),
+then runs **four Codex sessions in parallel**. Two are producers — **A** hunts injection /
 data-flow bugs, **B** hunts logic / access-control bugs — and they stream findings into a
 shared, file-locked queue (`workspace/findings/`). The third session, **C** (convergence),
 continuously consumes that queue: it cross-validates each finding with an independent engine,
@@ -37,7 +37,7 @@ you're modifying the design, not just running it.
 
 **Seed (no-LLM) vs hunt (LLM).** The call graph, module list, and built-in-sink edges are
 *deterministic* — there's no judgment in parsing PHP into a call graph. So that work is done
-*once*, cheaply, by tree-sitter, and written to `CODE_MODEL.json` for everyone to read. If
+*once*, cheaply, by ast+regex extractors, and written to `CODE_MODEL.json` for everyone to read. If
 each session re-derived structure, you'd pay LLM tokens (and wall-clock) three times to
 recompute the same facts, and the three copies could disagree. Deterministic facts → build
 once, share; judgment → spend the model on that.
@@ -121,7 +121,7 @@ everything else is a pure function of it, recomputed.
 
 ### 1.5.4 How the *lifecycles* stay in sync (supervisors + `_stop`)
 
-Sessions are finite and independent, so nothing inherently keeps all three *running together*
+Sessions are finite and independent, so nothing inherently keeps all four *running together*
 for the duration. The coordination primitive is again the filesystem: each role runs in a
 shell `supervise()` loop that respawns the session on exit **until** either a deadline
 (`MAX_HOURS`) or the presence of `workspace/_stop`. `_stop` is a shared kill-switch every
@@ -187,7 +187,7 @@ perfectly in seconds.
 The Code Model (`workspace/CODE_MODEL.json`) is the tool-made map the model reasons *over*
 instead of reconstructing. Two layers, by design:
 
-- **`structural` (tool, tree-sitter).** Files, entry points, and the **call graph** — the
+- **`structural` (tool, ast+regex).** Files, entry points, and the **call graph** — the
   `caller → callee` edges, plus `<builtin-sink>` edges marking calls to dangerous primitives
   (`query`, `exec`, `unserialize`, `include`, …). This is the connectivity the model can't
   reliably infer from local reads but a parser gets exactly. It's what lets analysis **follow
@@ -325,7 +325,7 @@ candidate ──> cross_validated ──> reproduced ──> confirmed
 Built **once** by the seed stage, reused by every session: `workspace/CODE_MODEL.json`.
 
 ### 3.1 `build_code_model.py` / `build_code_model.sh` (structural, tool)
-Uses **tree-sitter** (with a regex backstop) to extract:
+Uses **ast (python) + regex extractors** to extract:
 - `files`, `entry_points`
 - a **call graph**: `caller -> callee` edges. PHP node types
   (`function_call_expression`, `member_call_expression`, `scoped_call_expression`) and
@@ -335,7 +335,7 @@ Uses **tree-sitter** (with a regex backstop) to extract:
 
 Output lives under `structural.call_graph`. On a large app `call_edges` is in the thousands
 (tens of thousands of edges for a large app). **`call_edges: 0` means the structural build failed** —
-check tree-sitter install. The graph is *coarse*: a sink used directly on input
+check the extractor ran. The graph is function/method-level but still a skeleton: a sink used directly on input
 (`include $_GET['x']`) is not an edge, so agents always read code too.
 
 ### 3.2 `callgraph.py` (query the graph)
@@ -646,7 +646,7 @@ Detach: `Ctrl-b` then `d` (sessions keep running). Re-attach: `tmux attach -t ta
 ### Setup
 ```bash
 python3 -m venv .venv && . .venv/bin/activate
-pip install jsonschema tree-sitter-language-pack pyyaml requests
+pip install jsonschema pyyaml requests
 curl -fsSL https://raw.githubusercontent.com/opengrep/opengrep/main/install.sh | bash
 export PATH="$HOME/.opengrep/cli/latest:$PATH"
 .agents/skills/vuln-track-a/scripts/fetch_rules.sh        # once, online
@@ -696,7 +696,7 @@ tmux kill-session -t taintforge 2>/dev/null
 
 | symptom | cause | fix |
 |---|---|---|
-| `call_edges: 0` | tree-sitter build failed | install `tree-sitter-language-pack`; re-seed |
+| `call_edges: 0` | extractor build failed | check python3 + re-seed; inspect _log for errors |
 | probe: `Operation not permitted` | sandbox network off | add `--config sandbox_workspace_write.network_access=true` |
 | disclosure never set | web search off | add `--config web_search=live` |
 | IDOR stuck at candidate | only 1 account (no victim to compare) | add ≥2 normal users to `accounts.json` |

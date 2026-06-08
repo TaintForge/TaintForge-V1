@@ -2,7 +2,7 @@
 
 You are one of **four Codex sessions** run in parallel by `audit.sh`. Read this first, then
 your role's skill under `.agents/skills/`. **You are the analyst — you author findings.**
-Tools (tree-sitter, OpenGrep/CodeQL, probe.py, canary.py, browser_probe.py) only give leads
+Tools (the ast+regex extractor, OpenGrep/CodeQL, probe.py, canary.py, browser_probe.py) only give leads
 and cross-checks; a tool hit is a place to look, never a finding by itself.
 
 The four roles share one streaming queue, `workspace/findings/`:
@@ -140,7 +140,7 @@ candidate --cross-val--> cross_validated --repro--> reproduced --> confirmed
 
 ## Tooling
 
-- **tree-sitter** - Code Model AST / call graph.
+- **ast+regex extractor** - Code Model symbols / call graph (ast for python, regex for others).
 - **OpenGrep (preferred) / Semgrep** - Track A leads + Track A-style cross-validation. Prefer
   OpenGrep: free for private code, cross-file taint, stable core (Semgrep OSS segfaults on
   large repos). Leads go to `workspace/hints/`, never straight to findings.

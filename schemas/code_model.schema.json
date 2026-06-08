@@ -4,36 +4,87 @@
   "title": "CodeModel",
   "description": "Built ONCE by the source-model stage, consumed by everything downstream. Two layers: `structural` (tool-driven facts) and `comprehension` (LLM-driven meaning). Track A consumes mainly structural; Track B consumes mainly comprehension.",
   "type": "object",
-  "required": ["target", "structural", "comprehension", "generated_at"],
+  "required": [
+    "target",
+    "structural",
+    "comprehension",
+    "generated_at"
+  ],
   "additionalProperties": false,
   "properties": {
     "target": {
       "type": "object",
-      "required": ["name", "languages", "root"],
+      "required": [
+        "name",
+        "languages",
+        "root"
+      ],
       "properties": {
-        "name": { "type": "string" },
-        "languages": { "type": "array", "items": { "type": "string" } },
-        "root": { "type": "string", "description": "Path under targets/." },
-        "commit": { "type": "string" }
+        "name": {
+          "type": "string"
+        },
+        "languages": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "root": {
+          "type": "string",
+          "description": "Path under targets/."
+        },
+        "commit": {
+          "type": "string"
+        }
       }
     },
     "structural": {
       "type": "object",
-      "description": "Tool-driven (tree-sitter for AST/symbols; semgrep/codeql can enrich). Deterministic facts.",
+      "description": "Tool-driven (ast+regex extractors; tree-sitter/semgrep/codeql can enrich later). Deterministic facts.",
       "properties": {
-        "files": { "type": "array", "items": { "type": "string" } },
+        "files": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
         "entry_points": {
           "type": "array",
           "description": "Where external input enters. Seeded from routes/handlers/CLI.",
           "items": {
             "type": "object",
             "properties": {
-              "kind": { "type": "string", "description": "http-route | cli | message-queue | webhook ..." },
-              "method": { "type": "string" },
-              "path": { "type": "string" },
-              "handler": { "type": "string" },
-              "file": { "type": "string" },
-              "line": { "type": "integer" }
+              "kind": {
+                "type": "string",
+                "description": "http-route | cli | message-queue | webhook ..."
+              },
+              "method": {
+                "type": "string"
+              },
+              "path": {
+                "type": "string"
+              },
+              "handler": {
+                "type": "string"
+              },
+              "file": {
+                "type": "string"
+              },
+              "line": {
+                "type": "integer"
+              },
+              "handler_symbol": {
+                "type": "string"
+              },
+              "handler_resolution": {
+                "type": "string"
+              },
+              "confidence": {
+                "type": "string"
+              },
+              "raw": {
+                "type": "string"
+              }
             }
           }
         },
@@ -42,12 +93,98 @@
           "description": "Directed edges caller -> callee.",
           "items": {
             "type": "object",
-            "properties": { "from": { "type": "string" }, "to": { "type": "string" } }
+            "properties": {
+              "from": {
+                "type": "string"
+              },
+              "to": {
+                "type": "string"
+              },
+              "callee": {
+                "type": "string",
+                "description": "Syntactic callee name at the callsite."
+              },
+              "receiver": {
+                "type": "string",
+                "description": "Receiver/class/module name if present."
+              },
+              "caller_symbol": {
+                "type": "string"
+              },
+              "caller_name": {
+                "type": "string"
+              },
+              "caller_file": {
+                "type": "string"
+              },
+              "caller_line": {
+                "type": "integer"
+              },
+              "callsite_id": {
+                "type": "string"
+              },
+              "callsite_file": {
+                "type": "string"
+              },
+              "callsite_line": {
+                "type": "integer"
+              },
+              "callee_symbol": {
+                "type": "string",
+                "description": "Resolved target symbol id when known."
+              },
+              "callee_name": {
+                "type": "string"
+              },
+              "callee_file": {
+                "type": "string"
+              },
+              "callee_line": {
+                "type": "integer"
+              },
+              "resolution": {
+                "type": "string",
+                "description": "same-file | imported-name | class-method | unique-name | builtin-sink | external-or-dynamic | ambiguous-name ..."
+              },
+              "confidence": {
+                "type": "string"
+              },
+              "kind": {
+                "type": "string"
+              },
+              "sink_category": {
+                "type": "string"
+              },
+              "raw": {
+                "type": "string"
+              }
+            }
           }
         },
-        "symbols_ref": { "type": "string", "description": "Pointer/path to the symbol+def-use table (kept out-of-band if large)." },
-        "cfg_ref": { "type": "string", "description": "Pointer to CFG artifact." },
-        "dataflow_ref": { "type": "string", "description": "Pointer to data-flow / SSA skeleton artifact." }
+        "symbols_ref": {
+          "type": "string",
+          "description": "Pointer to the symbol+def-use table."
+        },
+        "cfg_ref": {
+          "type": "string"
+        },
+        "dataflow_ref": {
+          "type": "string",
+          "description": "Pointer to data-flow / SSA skeleton artifact."
+        },
+        "schema_version": {
+          "type": "integer"
+        },
+        "callsites_ref": {
+          "type": "string"
+        },
+        "proof_ledger_ref": {
+          "type": "string",
+          "description": "Pointer to route/sink proof units."
+        },
+        "stats": {
+          "type": "object"
+        }
       }
     },
     "comprehension": {
@@ -57,9 +194,18 @@
         "service_identity": {
           "type": "object",
           "properties": {
-            "domain": { "type": "string", "description": "fintech | ecommerce | saas ..." },
-            "purpose": { "type": "string" },
-            "sensitive_data": { "type": "array", "items": { "type": "string" } }
+            "domain": {
+              "type": "string"
+            },
+            "purpose": {
+              "type": "string"
+            },
+            "sensitive_data": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
           }
         },
         "route_map": {
@@ -67,11 +213,30 @@
           "items": {
             "type": "object",
             "properties": {
-              "method": { "type": "string" },
-              "path": { "type": "string" },
-              "handler": { "type": "string" },
-              "auth_required": { "type": "boolean" },
-              "role_required": { "type": "string" }
+              "method": {
+                "type": "string"
+              },
+              "path": {
+                "type": "string"
+              },
+              "handler": {
+                "type": "string"
+              },
+              "auth_required": {
+                "type": "boolean"
+              },
+              "role_required": {
+                "type": "string"
+              },
+              "file": {
+                "type": "string"
+              },
+              "line": {
+                "type": "integer"
+              },
+              "handler_symbol": {
+                "type": "string"
+              }
             }
           }
         },
@@ -80,20 +245,46 @@
           "items": {
             "type": "object",
             "properties": {
-              "name": { "type": "string" },
-              "steps": { "type": "array", "items": { "type": "string" }, "description": "controller -> service -> repo -> db" }
+              "name": {
+                "type": "string"
+              },
+              "steps": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
             }
           }
         },
         "permission_model": {
           "type": "object",
           "properties": {
-            "roles": { "type": "array", "items": { "type": "string" } },
-            "auth_mechanism": { "type": "string", "description": "session | jwt | oauth ..." },
+            "roles": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "auth_mechanism": {
+              "type": "string"
+            },
             "authz_locations": {
               "type": "array",
-              "description": "Where access checks actually live in code. Track B compares this against expected.",
-              "items": { "type": "object", "properties": { "file": { "type": "string" }, "line": { "type": "integer" }, "check": { "type": "string" } } }
+              "items": {
+                "type": "object",
+                "properties": {
+                  "file": {
+                    "type": "string"
+                  },
+                  "line": {
+                    "type": "integer"
+                  },
+                  "check": {
+                    "type": "string"
+                  }
+                }
+              }
             }
           }
         },
@@ -102,9 +293,18 @@
           "items": {
             "type": "object",
             "properties": {
-              "name": { "type": "string" },
-              "steps": { "type": "array", "items": { "type": "string" } },
-              "state": { "type": "string", "description": "What state persists across steps (cart, session, wizard step)." }
+              "name": {
+                "type": "string"
+              },
+              "steps": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "state": {
+                "type": "string"
+              }
             }
           }
         },
@@ -113,13 +313,23 @@
           "items": {
             "type": "object",
             "properties": {
-              "boundary": { "type": "string" },
-              "attacker_controlled_inputs": { "type": "array", "items": { "type": "string" } }
+              "boundary": {
+                "type": "string"
+              },
+              "attacker_controlled_inputs": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
             }
           }
         }
       }
     },
-    "generated_at": { "type": "string", "format": "date-time" }
+    "generated_at": {
+      "type": "string",
+      "format": "date-time"
+    }
   }
 }

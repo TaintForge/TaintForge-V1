@@ -9,51 +9,40 @@ Track B finds bugs where the data flow is fine but the *rules* are wrong: a user
 reach a resource or action they shouldn't. Tools can't do this alone - they don't know
 what SHOULD be allowed. So a script gives you structural SEEDS and YOU do the reasoning.
 
-Input: `workspace/CODE_MODEL.json` (`comprehension` layer - route_map, permission_model,
-user_journeys, trust_boundaries). Output: `workspace/findings/*.json` (track `B`,
-status `candidate`), validating against `schemas/finding.schema.json`.
+Input: `workspace/CODE_MODEL.json` (`comprehension` - route_map, permission_model,
+user_journeys, trust_boundaries). Output: `workspace/findings/*.json` (track `B`, candidate).
 
-> If `comprehension` is empty, run the `source-model` skill first. Track B has nothing
-> to reason on without the route map and permission model.
+> If `comprehension` is thin, `build_authz_matrix.py` falls back to
+> `structural.entry_points`, but auth/role fields will be `unknown`. Treat unknown as
+> work to prove by reading the route-to-resource path, not as safe.
 
-## B1 - Permission matrix (build the "expected", then seed red flags)
+## B1 - Permission matrix
 
 ```bash
 .agents/skills/vuln-track-b/scripts/build_authz_matrix.py
 ```
-Produces `workspace/_authz_matrix.json`: a role x route matrix with `expected_access`
-set to `?`, plus deterministic red flags (`id-param-IDOR-candidate`,
-`state-change-without-auth`, `admin-route-without-role`, `no-explicit-authz-check`) and
-candidate lists. Now YOU fill `expected_access` per role from the service's intent
-(`comprehension.service_identity`): for each route, who *should* be allowed?
+Produces `workspace/_authz_matrix.json`: a role x route matrix with `expected_access` set to
+`?`, plus deterministic red flags and candidate lists. Now YOU fill `expected_access` per
+role from the service's intent: for each route, who *should* be allowed?
 
 ## B2 - Compare expected vs actual (read the handlers)
 
-For every route - especially the flagged ones - open the handler and find the ACTUAL
-check. Compare against your `expected_access`:
-- **IDOR / BOLA (CWE-639):** route takes an object id and the handler loads it without an
-  ownership/tenant check (`WHERE id = :id` but not `AND owner = current_user`).
-- **Missing authorization (CWE-862):** state-changing or sensitive route with no authz
-  check on the path to the action.
-- **Privilege escalation (CWE-269):** lower role reaches an admin-only action; role check
-  missing or wrong.
-- **Auth bypass (CWE-287):** the check can be skipped (wrong order, default-allow,
-  unauthenticated branch).
+For every route - especially flagged ones - open the handler and find the ACTUAL check:
+- **IDOR / BOLA (CWE-639):** route takes an object id, handler loads it without an
+  ownership/tenant check.
+- **Missing authorization (CWE-862):** sensitive/state-changing route with no authz check.
+- **Privilege escalation (CWE-269):** lower role reaches an admin-only action.
+- **Auth bypass (CWE-287):** the check can be skipped.
 Each real mismatch is a finding.
 
 ## B3 - User-journey / state analysis (business logic)
 
-Walk `comprehension.user_journeys`. Look for:
-- **Step-skipping / improper workflow (CWE-841):** can a later step be called directly,
-  skipping payment/verification?
-- **State manipulation:** client-controlled state (price, quantity, status) trusted by the
-  server (mass assignment, CWE-915).
-- **Race conditions (CWE-362):** double-spend, coupon reuse, TOCTOU on a shared resource.
+Walk `comprehension.user_journeys`:
+- **Step-skipping (CWE-841):** can a later step be called directly?
+- **State manipulation:** client-controlled state (price, status) trusted by the server (CWE-915).
+- **Race conditions (CWE-362):** double-spend, coupon reuse, TOCTOU.
 
 ## B4 - Emit findings
-
-For each confirmed mismatch, pipe a partial finding to the writer (it fills id, history,
-timestamps, validates, append-only):
 
 ```bash
 echo '{"track":"B","vuln_class":"idor","cwe":"CWE-639",
@@ -65,36 +54,33 @@ echo '{"track":"B","vuln_class":"idor","cwe":"CWE-639",
 | .agents/skills/_shared/write_finding.py
 ```
 
-## Trace entry -> resource across files (use the call graph)
+## Trace entry -> resource across files
 
-Access-control bugs are about a MISSING GATE somewhere on the path from a route to a
-resource access, not a single line. For each route/action:
 ```bash
-python3 .agents/skills/source-model/scripts/callgraph.py --callees <handlerFile>   # what the handler calls
-python3 .agents/skills/source-model/scripts/callgraph.py --callers <load/findById/getByID>  # who can reach a resource load
+python3 .agents/skills/source-model/scripts/callgraph.py --entries
+python3 .agents/skills/source-model/scripts/callgraph.py --forward '<handler_symbol>' -d 8
+python3 .agents/skills/source-model/scripts/callgraph.py --callers <load/findById/findOne>
+python3 .agents/skills/source-model/scripts/proof_ledger.py --next route
 ```
-Walk handler -> service -> repository/object-load and check the WHOLE chain for:
-- authentication (is the user logged in?),
-- authorization (role/permission check for this action?),
-- object ownership / tenant scoping (does the loaded id belong to the caller?).
-A resource load reachable from a route with no ownership check on the path = IDOR/BOLA.
-A state-changing action with no role check = broken access control. Don't judge from the
-handler file alone - follow the calls.
+Walk handler -> service -> repository/object-load and check the WHOLE chain for authn, authz,
+and object ownership/tenant scoping. A resource load reachable from a route with no ownership
+check = IDOR/BOLA. Don't judge from the handler file alone.
 
-## Exhaustiveness - do NOT stop after a shallow pass
+## Hypotheses
 
-You may be invoked on ONE module. Cover it FULLY:
-- Account for EVERY route/handler in this module against the permission matrix. For each,
-  either record a finding OR state why the access check is adequate. Enumerate, don't sample.
-- Check every red-flagged candidate AND routes the tool didn't flag.
-- Walk every logic class: IDOR/BOLA, missing authz, privilege escalation, auth bypass,
-  workflow/step-skipping, mass assignment, race conditions.
-- Only stop when every route+action in the module is accounted for.
+Also read `workspace/HYPOTHESES.json`. For each open hypothesis bound to a real endpoint,
+verify it against the code; if confirmed write a finding and set its `hypothesis_id`, then
+mark the hypothesis verified; if disproved mark it refuted with a one-line reason. These are
+intent-level business-logic attacks to check alongside the structural matrix.
+
+## Exhaustiveness
+
+Account for EVERY route/handler in the module against the matrix; for each, a finding OR a
+route proof unit marked safe with concrete authn/authz/ownership evidence. Walk every logic
+class. Only stop when every route+action is accounted for.
 
 ## Rules
 - `targets/` is read-only.
 - A Track B finding needs a concrete "who can do what they shouldn't, and where in code".
-  No abstract "could be insecure" - point at the missing/!wrong check.
-- Don't duplicate Track A: injection/data-flow is Track A's job. Track B is authorization
-  and workflow logic.
-- Leave `status: candidate`; convergence reproduces by replaying requests across roles/ids.
+- Don't duplicate Track A: injection/data-flow is Track A's job.
+- Leave `status: candidate`; convergence reproduces across roles/ids.
