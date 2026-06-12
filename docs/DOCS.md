@@ -17,13 +17,14 @@ This document explains every component and every workflow in depth. For a quick 
 TaintForge seeds a structural model of the target (ast+regex call graph + module split),
 then runs **four Codex sessions in parallel**. Two are producers — **A** hunts injection /
 data-flow bugs, **B** hunts logic / access-control bugs — and they stream findings into a
-shared, file-locked queue (`workspace/findings/`). The third session, **C** (convergence),
-continuously consumes that queue: it cross-validates each finding with an independent engine,
-reproduces it against a live instance, web-searches whether it is a known CVE or a novel
-0-day, writes a runnable PoC, and ranks everything into a report. Each session is supervised
-at the shell level so it **auto-respawns** if it exits, keeping the pipeline alive for hours.
-The agent is always the analyst that authors findings; tools only provide leads and
-cross-checks.
+shared, file-locked queue (`workspace/findings/`). **C** (convergence) continuously consumes
+that queue: it cross-validates each finding with an independent engine, reproduces it against
+a live instance, web-searches whether it is a known CVE or a novel 0-day, writes a runnable
+PoC, and ranks everything into a report. **D** (exploitation) takes only the critical findings
+C has already proved and weaponizes them — chaining, escalating, defeating sanitizers — with an
+honest record of any bounds. Each session is supervised at the shell level so it
+**auto-respawns** if it exits, keeping the pipeline alive for hours. The agent is always the
+analyst that authors findings; tools only provide leads and cross-checks.
 
 ---
 
@@ -282,6 +283,37 @@ Model-first gives the analyst a map instead of a pile of files; sink-first turns
 hunt into a bounded checklist; hypothesize-then-verify stops both the tools' false positives
 and the model's hallucinations from reaching the report. Each choice exists to counter a
 specific, observed failure of the naive approach.
+
+### Depth: chain-building, not one-pass scanning
+
+Sink-first coverage finds bugs that have a recognizable sink. It does **not**, on its own, find
+the class of high-severity bugs that are a *chain* of individually-harmless steps — a parser that
+returns a raw reference, a property walk with no `hasOwnProperty`, a constructor reachable at the
+end — where no single line is "the sink" and the vulnerability exists only in the composition.
+That is exactly the kind of bug a human researcher finds by reading one parser/deserializer/
+dispatcher line by line and repeatedly asking "if the attacker controls this, what does it enable
+next?", carrying each gained capability forward.
+
+To make the agents analyze that way rather than scan-and-move-on, three mechanisms are layered on
+top of the model-first/sink-first base:
+
+1. **A deep-dive directive** in every producer brief: on code that parses, deserializes,
+   dispatches on a name/string, reflects, or walks user-controlled property paths, stop scanning
+   and reason step by step about what each attacker-controlled value enables next.
+2. **A leads notebook** (`_shared/leads.py`, file-locked like the finding writer) that records the
+   intermediate material a single pass would throw away: a `lead` (interesting, not-yet-a-bug
+   observation, with what it `enables`), a `primitive` (confirmed capability), a per-target `note`
+   (running dig state that survives respawns), and `link`ed leads forming a candidate chain.
+3. **Deep-dive-first coverage**: `coverage.py --next` raises the priority of modules whose names
+   hint at parsing/deserialization/dispatch/templating/reflection — where chains concentrate —
+   so finite analysis time is spent where composition bugs live.
+
+The convergence (C) and exploitation (D) sessions read the candidate chains and try to realize
+them end to end into a single chained finding. A lead is never promoted to a finding by itself,
+and is never discarded merely for not being a bug yet: it is kept because it may complete a chain
+another session is building. The trade-off is cost — deep reading is far more expensive than
+scanning — which is why coverage steers depth toward the modules most likely to reward it rather
+than digging everywhere.
 
 ## 2. The finding contract (`schemas/finding.schema.json`)
 
@@ -563,6 +595,29 @@ write_finding.py --out DIR --schema schemas/finding.schema.json
 ```
 Updates merge into `history` for a full audit trail. It validates against the finding schema.
 
+### 7.1 The deep-analysis notebook (`_shared/leads.py`)
+
+Where `write_finding.py` records vulnerabilities, `leads.py` records the raw material they're
+built from — the intermediate observations a one-pass scan would discard. Also file-locked, so
+parallel sessions append safely.
+```bash
+echo '{"kind":"lead","where":{"file":"x.js","line":42,"symbol":"parseModel"},
+       "observation":"walks value[path[i]] from user-split string, no hasOwnProperty",
+       "enables":["arbitrary-member-walk"]}' | leads.py add
+echo '{"kind":"primitive","observation":"can reach Function constructor",
+       "enables":["code-exec"]}' | leads.py add
+leads.py note <target> --set "understood X; hold capability Y; next try Z"  # running dig state
+leads.py open | list [--kind lead|primitive]    # what's still combinable
+leads.py link <id> <id> ...                      # record a candidate chain
+leads.py update <id> --status combined|dead|promoted --reason "..."
+```
+Three kinds of entry: a **lead** (interesting, not-yet-a-bug observation, with what it
+`enables`), a **primitive** (a confirmed capability), and a **note** (per-target running state
+that survives respawns, so a later session continues the dig instead of restarting). `link`
+groups leads into a candidate chain. The data lives in `workspace/leads.json` and
+`workspace/_analysis_notes.json`. Leads are deliberately *not* findings: only `write_finding.py`
+records a vulnerability, possibly built from several promoted leads.
+
 ---
 
 ## 8. Orchestration (`audit.sh`, `start.sh`)
@@ -596,13 +651,15 @@ while findings still arrive). The supervisor respawns it until the deadline or `
 
 ### 8.2 `start.sh` — the tmux wrapper
 Calls `SPAWN_ONLY=1 audit.sh` (fds detached so it returns immediately), then builds a tmux
-window with **four panes whose labels are bound to pane ids** (so the `tiled` layout can't
-scramble them). The detached session is created large (`-x 250 -y 60`) so the 4th pane isn't
-dropped by minimum-size limits.
+window with **panes whose labels are bound to pane ids** (so the `tiled` layout can't scramble
+them). The detached session is created large (`-x 250 -y 60+`) so panes aren't dropped by
+minimum-size limits. The 5-pane layout:
 ```
-🅐 INJECT (A)   |  🅑 LOGIC (B)
-🅒 CONVERGE (C) |  📊 DASHBOARD
+🅐 INJECT (A)   | 🅑 LOGIC (B)
+🅒 CONVERGE (C) | 🅓 EXPLOIT (D)
+📊 DASHBOARD
 ```
+Panes are bound to pane ids (not indices) so the `tiled` layout can't scramble the labels.
 Detach: `Ctrl-b` then `d` (sessions keep running). Re-attach: `tmux attach -t taintforge`.
 
 ---
@@ -614,6 +671,8 @@ Detach: `Ctrl-b` then `d` (sessions keep running). Re-attach: `tmux attach -t ta
 2. SPAWN       audit.sh launches A, B, C under supervisors; canary.py if --url
 3. PRODUCE     A (sink→source taint) and B (entry→resource authz) stream findings
                  → write_finding.py → workspace/findings/<id>.json  [status: candidate]
+                 + on parser/deserializer/dispatcher code: deep-dive, record leads/primitives
+                   → leads.py (workspace/leads.json); link combinable ones into candidate chains
 4. CONVERGE    C loops:
                  a. cross_validate.sh + correlate.py     → cross_validated
                  b. probe.py (--jar sessions) / canary.py → reproduced  (live PoC)
@@ -621,6 +680,7 @@ Detach: `Ctrl-b` then `d` (sessions keep running). Re-attach: `tmux attach -t ta
                  d. agent writes poc.py → repro.poc_script
                  e. emit_poc.py  → report/<id>/{poc.py, finding.md}
                  f. triage.py    → report/report.md (ranked, 0-day section)
+                 g. leads.py open → realize candidate chains into one chained finding
 5. FEEDBACK    repro fails → needs_reanalysis → producers revisit
 6. RESPAWN     any session exits → supervisor restarts it (until MAX_HOURS / _stop)
 7. STOP        touch workspace/_stop; kill $(cat workspace/_pids); pkill -f 'codex exec'

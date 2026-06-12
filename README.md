@@ -34,10 +34,18 @@ workflow-by-workflow walkthrough, see **[DOCS.md](DOCS.md)**.
         │ C  CONSUMER (Codex)   runs continuously while A & B produce      │
         │   cross-validate (CodeQL/OpenGrep) → reproduce live (probe.py     │
         │   sessions + SSRF canary) → web-search disclosure → PoC → triage  │
-        └───────────────┬───────────────────────────────────────────────┘
-                        │ repro fails → needs_reanalysis → back to A/B (feedback)
-                        ▼
-       workspace/report/report.md   +   report/<id>/{poc.py, finding.md}
+        └───────────────┬───────────────────────────────┬───────────────┘
+                        │ repro fails → needs_reanalysis │ reproduced/confirmed
+                        │   → back to A/B (feedback)      │ + critical class
+                        │                                 ▼
+                        │              ┌──────────────────────────────────┐
+                        │              │ D  EXPLOITATION (Codex)            │
+                        │              │ weaponize C's proven criticals:    │
+                        │              │ chain & escalate, defeat sanitizers│
+                        │              │ → exploit obj + report/<id>/exploit.py
+                        │              └──────────────────┬───────────────┘
+                        ▼                                 ▼
+       workspace/report/report.md   +   report/<id>/{poc.py, finding.md, exploit.py}
 ```
 
 ## How it works
@@ -80,12 +88,30 @@ candidate ──> cross_validated ──> reproduced ──> confirmed
                           └── needs_reanalysis     (feedback → producers)
 ```
 
+**Depth over breadth — chaining, not just scanning.** Most real bugs in mature code aren't a
+single obvious sink; they're a *chain* of individually-harmless steps (a raw reference here, a
+missing check there, a reachable dangerous construct at the end) that only become a vulnerability
+when combined — the kind of bug a human researcher finds by reading one parser/deserializer/
+dispatcher line by line and asking, at each step, "if the attacker controls this, what does it
+let me do next?". To make the agents work this way rather than one-pass scanning, there's a
+deep-analysis notebook (`.agents/skills/_shared/leads.py`):
+
+- a **lead** is an interesting-but-not-yet-a-bug observation (recorded with what it *enables*);
+- a **primitive** is a confirmed capability built from leads;
+- a **note** is the running state of a dig on one target (so a respawn continues, not restarts);
+- linked leads form a **candidate chain** that C (convergence) and D (exploitation) try to
+  realize into one chained vulnerability.
+
+Coverage prioritizes deep-dive-worthy modules (parsers, deserializers, dispatchers, template/
+reflection code) where such chains hide. A lead is never a finding by itself — but it's kept,
+not discarded, because it may be the missing piece another session needs.
+
 ## Layout
 
 ```
 taintforge/                         ← repo root (run from here)
-  start.sh                          ← tmux launcher: 5-pane live dashboard (A | B / C | D / stats)
-  audit.sh                          ← engine: seeds + spawns the 4 parallel sessions
+  start.sh                          ← tmux launcher: 5-pane live view (A|B / C|D / dashboard)
+  audit.sh                          ← engine: seeds the model + spawns the parallel sessions
   accounts.json[.example]           ← test accounts for dynamic auth/IDOR testing
   fix_skills.py                     ← repairs SKILL.md YAML frontmatter if Codex can't load
   AGENTS.md                         ← operating contract Codex reads first
@@ -93,26 +119,32 @@ taintforge/                         ← repo root (run from here)
     code_model.schema.json          ← contract: the Code Model
     finding.schema.json             ← contract: one finding (drives convergence)
   .agents/skills/                   ← Codex discovers skills here
-    _shared/        write_finding.py (file-locked finding writer, used by A, B and C)
-    source-model/   build the Code Model (structural + comprehension); coverage.py, callgraph.py
+    _shared/        write_finding.py (file-locked finding writer), budget_guard.py (token cap), leads.py (deep-analysis notebook: leads/primitives/chains)
+    source-model/   build the Code Model (structural + comprehension); coverage.py, callgraph.py, proof_ledger.py
+    hypothesize/    gen_hypotheses.py, catalog.json, cwe_to_hypotheses.py (business-logic hypotheses)
     vuln-track-a/   injection/data-flow finder; run_semgrep.sh leads, rules/
     vuln-track-b/   logic/access-control finder; build_authz_matrix.py
     convergence/    cross_validate.sh, correlate.py, probe.py (session/--jar),
-                    canary.py (SSRF OOB), triage.py, emit_poc.py, queue.py, dashboard.py
+                    canary.py (SSRF OOB), browser_probe.py, triage.py, emit_poc.py, queue.py, dashboard.py
   targets/                          ← code under assessment (read-only)
   workspace/
-    CODE_MODEL.json                 ← structural + comprehension
-    coverage.json                   ← module list / analysis progress
+    CODE_MODEL.json                 ← structural + comprehension (graph-only on huge repos)
+    HYPOTHESES.json                 ← business-logic hypotheses bound to entry points
+    coverage.json                   ← module / contract list + analysis progress
+    leads.json                      ← deep-analysis: leads, primitives, candidate chains
+    _analysis_notes.json            ← per-target running dig notes (survive respawns)
+    cm/<module>.json                ← per-module full Code Model (whitebox, huge-repo path work)
     hints/                          ← optional tool leads (not findings)
     findings/<id>.json              ← the queue; every finding authored by Codex
-    report/report.md                ← rolling ranked index (incl. ⚠️ potential 0-day section)
+    report/report.md                ← rolling ranked index (incl. ⚠️ potential 0-day, 💥 weaponized)
     report/<id>/poc.py              ← per-vuln runnable PoC (reproduced/confirmed only)
+    report/<id>/exploit.py          ← per-vuln weaponized exploit (agent D, critical only)
     report/<id>/finding.md          ← per-vuln individual report
     _accounts.json                  ← copied test accounts (live auth/IDOR)
     _canary.log                     ← SSRF out-of-band callback hits
     _pids                           ← supervisor pids (stop handle)
     _stop                           ← touch this to stop all supervisors
-    _log_{A,B,C}.txt                ← per-session reasoning logs (appended across respawns)
+    _log_{A,B,C,D}.txt              ← per-session logs (appended across respawns)
 ```
 
 ## The Code Model
@@ -151,6 +183,34 @@ The graph is coarse: construct sinks used directly on input (`include $_GET[...]
 of a request value) aren't edges, so the agents also read code. `call_edges` should be in
 the thousands for a large app — `0` means the structural build failed.
 
+## Deep analysis (chaining multi-step bugs)
+
+Shallow scanning finds shallow bugs. The high-impact vulnerabilities in mature code are usually
+a *chain*: several individually-safe behaviors that compose into an exploit (think of how
+researchers chain a parser quirk → a missing `hasOwnProperty` → a reachable constructor into
+RCE). No single line is "the sink", so a one-pass "find sink → judge" sweep can't see them.
+
+TaintForge addresses this with three pieces:
+
+1. **A deep-dive instruction** (in every producer's brief): on code that parses, deserializes,
+   dispatches on a name, reflects, or walks user-controlled property paths, read it line by line
+   and, at each step, ask "if the attacker controls this value, what does it enable next?" —
+   then carry that capability forward instead of stopping at the first sink check.
+2. **The leads notebook** (`.agents/skills/_shared/leads.py`): file-locked like `write_finding.py`.
+   - `leads.py add` (kind `lead`) — an interesting observation that isn't a bug yet, with what
+     it `enables`.
+   - `leads.py add` (kind `primitive`) — a confirmed capability.
+   - `leads.py note <target> --set "..."` — running state of a dig (understood / hold / next),
+     so a respawned session continues digging instead of restarting.
+   - `leads.py link <id> <id> ...` — record that several leads combine into a candidate chain.
+   - `leads.py open` / `list` — what's still combinable.
+3. **Deep-dive-first coverage**: `coverage.py --next` bumps modules whose names hint at parsing/
+   deserialization/dispatch/templating/reflection, since that's where chains hide.
+
+C (convergence) and D (exploitation) read the candidate chains and try to realize them end to
+end into one chained finding. A lead is **never** a finding on its own and is **never** discarded
+just for not being a bug yet — it may be the piece another session needs.
+
 ## Tooling (hints & cross-check only — never the author of a finding)
 
 - **ast + regex extractors** — language-agnostic symbol/call-graph extraction for the Code Model (ast for python, regex for others; no required deps).
@@ -184,10 +244,10 @@ If Codex logs `failed to load skill ... YAML frontmatter`, run `python3 fix_skil
 ./start.sh targets/<app>                              # static only, with dashboard
 ```
 
-`start.sh` opens a **tmux 5-pane live view** — 🅐 inject | 🅑 logic / 🅒 converge | 🅓 exploit
+`start.sh` opens a **tmux live view** — whitebox: 🅐 inject | 🅑 logic / 🅒 converge | 🅓 exploit
 and a dashboard pane (coverage bar, findings by status/class, novel + 💥 exploit counters,
-latest hits, elapsed time). Detach
-with `Ctrl-b` then `d` (sessions keep running); re-attach with `tmux attach -t taintforge`.
+latest hits, elapsed time). Detach with `Ctrl-b` then `d` (sessions keep running); re-attach
+with `tmux attach -t taintforge`.
 Stop everything (the `_stop` flag must come first, or supervisors respawn):
 `touch workspace/_stop; kill $(cat workspace/_pids); pkill -f 'codex exec'; tmux kill-session -t taintforge`.
 If tmux isn't installed, `start.sh` falls back to a plain headless run.

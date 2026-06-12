@@ -28,9 +28,13 @@
       "type": "string",
       "enum": [
         "A",
-        "B"
+        "B",
+        "F",
+        "G",
+        "H",
+        "I"
       ],
-      "description": "A = data-flow/injection, B = logic/authz."
+      "description": "A/F/H = data-flow, blackbox injection, or web3 fund-flow; B/G/I = logic/authz, blackbox logic, or web3 access-control."
     },
     "vuln_class": {
       "type": "string",
@@ -61,7 +65,11 @@
         "opengrep",
         "codeql",
         "llm-track-a",
-        "llm-track-b"
+        "llm-track-b",
+        "llm-track-f",
+        "llm-track-g",
+        "llm-track-h",
+        "llm-track-i"
       ],
       "description": "What produced/confirmed this finding."
     },
@@ -205,9 +213,14 @@
             "enum": [
               "track-a",
               "track-b",
+              "track-f",
+              "track-g",
+              "track-h",
+              "track-i",
               "cross-validation",
               "reproduction",
-              "triage"
+              "triage",
+              "exploitation"
             ]
           },
           "action": {

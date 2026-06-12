@@ -107,7 +107,18 @@ def main():
     if a.next:
         pend=[m for m in mods if m["status"]=="pending"]
         if not pend: return
-        pend.sort(key=lambda m:(-m.get("entry_count",0),-m.get("pending_proof_units",0),m["path"]))
+        # Deep-dive worthiness: modules whose path hints at parsing/deserialization/dispatch/
+        # reflection/templating/serialization are where multi-step chains hide (input is
+        # transformed through several steps). Bump them so they're seen sooner - after raw
+        # attack surface (entry points) but with weight, since one deep parser bug can outweigh
+        # many shallow handlers.
+        import re as _re
+        DEEP=_re.compile(r"(pars|deserial|serial|unmarshal|decode|reviv|reflect|dispatch|"
+            r"router|resolver|template|render|eval|interpret|marshal|flight|rpc|gadget|"
+            r"middleware|hydrat|transform|codec|protocol)", _re.I)
+        def deep_bonus(m): return 1 if DEEP.search(m.get("path","")) else 0
+        pend.sort(key=lambda m:(-m.get("entry_count",0),-deep_bonus(m),
+            -m.get("pending_proof_units",0),m["path"]))
         print(pend[0]["path"]); return
     if a.done:
         for m in mods:

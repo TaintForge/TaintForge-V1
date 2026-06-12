@@ -29,6 +29,7 @@ while [ $# -gt 0 ]; do
     *)             TARGET="$1"; shift;;
   esac
 done
+# TARGET (source dir) is required.
 [ -n "$TARGET" ] || { echo "usage: ./audit.sh [-u URL] [--accounts FILE] targets/<app>"; exit 2; }
 
 S=".agents/skills"
@@ -40,10 +41,7 @@ mkdir -p workspace/findings workspace/hints workspace/report
 
 echo "== seed (no LLM): structural model + module split + domain hypotheses =="
 [ -f .env ] && set -a && . ./.env && set +a   # load SSRF_HOST/PORT, CWE_XML if present
-# Global index: symbols + call graph + entry points over the WHOLE repo, WITHOUT the
-# dataflow/proof_ledger path enumeration (which blows a big app like GitLab up to GB-scale and
-# OOMs). Huge repos auto-fall back to graph-only; small ones still get the full set here.
-# A/B then build the FULL model per coverage module (see missions) for deep path/proof work.
+# Whitebox SEED: structural code model + module split.
 "$S/source-model/scripts/build_code_model.sh" "$TARGET" || true
 python3 "$S/source-model/scripts/coverage.py" --init "$TARGET" || true
 # auto-merge CWE-derived hypotheses once (if CWE_XML points at a real file and not merged yet)
@@ -54,6 +52,7 @@ if [ -n "${CWE_XML:-}" ] && [ -f "$CWE_XML" ]; then
     python3 "$S/hypothesize/scripts/cwe_to_hypotheses.py" "$CWE_XML" --catalog "$CAT" || true
   fi
 fi
+# Seed business-logic hypotheses (domain inferred from target name + entry points).
 python3 "$S/hypothesize/scripts/gen_hypotheses.py" --target "$TARGET" || true
 
 # ---- live-target / accounts context (only if --url given) ----
@@ -121,6 +120,26 @@ Then query that module model:
   python3 .agents/skills/source-model/scripts/proof_ledger.py --ledger workspace/cm/<m>.proof_ledger.json --next sink
 The global index is for resolving cross-module calls and locating entry points; the per-module
 full build is where you do deep path/sink/proof work.
+You don't get tired - keep going until repeated passes find nothing new.
+
+DEPTH OVER BREADTH on interesting code. Most code is shallow - check it and move on. But when
+you hit code that PARSES, DESERIALIZES, DISPATCHES on a name/string, does reflection/metaprogramming,
+walks user-controlled property paths, or transforms input through several steps, do NOT just ask
+'is there a known sink here'. Read that function line by line and ask, at EACH step: 'if the
+attacker controls this value, what does that let me do next?' Then carry that capability forward
+and ask again. Real bugs are often a CHAIN of individually-harmless steps (a raw reference here,
+a missing check there, a reachable constructor at the end) that only become a vulnerability when
+combined - no single line is 'the sink'.
+To support this, use the deep-analysis notebook .agents/skills/_shared/leads.py:
+  - record an interesting-but-not-yet-a-bug observation as a LEAD (echo JSON | leads.py add,
+    kind=lead) with what it ENABLES. Record a confirmed capability as a PRIMITIVE (kind=primitive).
+  - keep a running note on a target you're digging: leads.py note <target> --set 'understood X;
+    hold capability Y; next try Z' - so a respawn continues the dig instead of restarting.
+  - read leads.py open / list before you stop: can two leads COMBINE into something bigger?
+    leads.py link <id> <id> records a candidate chain for the consumer/exploitation sessions.
+  A lead is not a finding - only write_finding.py when you can state a concrete vulnerability
+  (possibly built FROM several leads). But don't discard a lead just because it isn't a bug yet;
+  it may be the missing piece of a chain another session finds.
 You don't get tired - keep going until repeated passes find nothing new.
 Also read workspace/HYPOTHESES.json: for each open hypothesis verify it against the code; if
 confirmed, write a finding and set its hypothesis_id, then mark the hypothesis verified; if
@@ -222,6 +241,12 @@ then
    .agents/skills/convergence/scripts/emit_poc.py to materialize workspace/report/<id>/
    (poc.py + finding.md), one folder per vulnerability - never merged.
 5) regenerate the rolling index workspace/report/report.md with .agents/skills/convergence/scripts/triage.py.
+6) review deep-analysis chains: run .agents/skills/_shared/leads.py open and leads.py list. When
+   several leads/primitives plausibly COMBINE into a real vulnerability (e.g. a parser quirk +
+   a missing check + a reachable dangerous construct), try to confirm that chain end-to-end
+   against the live target or by reading the code; if it holds, author ONE finding describing the
+   chained vulnerability (cite the lead ids in evidence) and mark those leads promoted. This is
+   how multi-step bugs that no single producer pass would flag get caught.
 DO NOT EVER STOP ON YOUR OWN. Do not check whether producer processes are alive. Do not
 treat an empty queue as completion. If workspace/findings/ has nothing new, sleep ~30s and
 check again - the producers stream findings continuously and new ones arrive over time.
@@ -238,7 +263,12 @@ proof-of-concept into a fully understood, weaponized exploit. Loop continuously:
 1) select: read workspace/findings/*.json; pick status in {reproduced,confirmed} whose
    vuln_class is one of the critical classes above and whose exploit.depth is missing or
    'shallow' (skip everything else - low/medium and unproven findings are not your job).
-   Highest severity first.
+   Highest severity first. ALSO consider candidate chains from .agents/skills/_shared/leads.py
+   list: when a chain of leads/primitives plausibly composes into a critical primitive (e.g.
+   arbitrary-member-walk + reachable-constructor → code execution), attempt to realize that
+   chain into a working exploit even if no single finding captured it yet - verify each link,
+   and if it works, record it as a weaponized finding citing the lead ids. Multi-step chains
+   are exactly the high-impact bugs a single producer pass misses.
 2) deepen: starting from the existing repro, push the exploit as far as it really goes, and
    VERIFY each step against the live target ($DYN) or, when no live target, against the code
    plus a local shell/interpreter model of the sink. Concretely:
@@ -292,14 +322,15 @@ supervise(){ # $1=tag $2=logfile $3=mission  -> echoes supervisor pid
     echo "===== [$(date +%H:%M:%S)] session $1 supervisor stopped =====" >> "$2"
   ) </dev/null >/dev/null 2>&1 & echo $!
 }
-PA=$(supervise A workspace/_log_A.txt "$MISSION_A")
-PB=$(supervise B workspace/_log_B.txt "$MISSION_B")
+P1=$(supervise A workspace/_log_A.txt "$MISSION_A")
+P2=$(supervise B workspace/_log_B.txt "$MISSION_B")
+echo "  A=$P1 (inject)  B=$P2 (logic)"
 PC=$(supervise C workspace/_log_C.txt "$MISSION_C")
 PD=$(supervise D workspace/_log_D.txt "$MISSION_D")
-echo "$PA $PB $PC $PD ${PCAN:-}" > workspace/_pids
-echo "  A=$PA  B=$PB  C=$PC  D=$PD  (supervisors; auto-respawn, ${MAX_HOURS}h budget)"
+echo "$P1 $P2 $PC $PD ${PCAN:-}" > workspace/_pids
+echo "  C=$PC  D=$PD  (supervisors; auto-respawn, ${MAX_HOURS}h budget)"
 
-stop_all(){ touch workspace/_stop; kill $PA $PB $PC $PD ${PCAN:-} 2>/dev/null; pkill -f "codex exec" 2>/dev/null; }
+stop_all(){ touch workspace/_stop; kill $P1 $P2 $PC $PD ${PCAN:-} 2>/dev/null; pkill -f "codex exec" 2>/dev/null; }
 
 # SPAWN_ONLY=1 -> return immediately (start.sh's tmux wrapper drives the display).
 if [ "${SPAWN_ONLY:-0}" = "1" ]; then
@@ -309,5 +340,5 @@ fi
 
 echo "  python3 $S/convergence/scripts/queue.py --counts   # watch the queue"
 trap 'echo; echo "stopping..."; stop_all' INT TERM
-wait $PA $PB $PC $PD
+wait $P1 $P2 $PC $PD
 echo "== run ended (deadline/stop) -> workspace/report/report.md =="
