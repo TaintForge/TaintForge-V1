@@ -145,6 +145,29 @@ Also read workspace/HYPOTHESES.json: for each open hypothesis verify it against 
 confirmed, write a finding and set its hypothesis_id, then mark the hypothesis verified; if
 disproved, mark it refuted with a one-line reason. These are intent-level (business-logic)
 attacks to check alongside your pattern scan.
+INTERROGATE EACH CODE UNIT - don't judge in a single direction. Following a sink backward to a
+source and checking for a guard is ONE question; a real reviewer asks several at once about the
+same code, and a verdict isn't done until they're answered:
+  1) Is this directly vulnerable on the obvious path?
+  2) Is it reachable by a DIFFERENT entry point or flow where the assumptions don't hold? The
+     same function called from an admin path, a webhook, a queue worker, an internal RPC, a
+     retry, or a different role may not have the guard the obvious caller does. Don't analyze
+     one caller and generalize.
+  3) If you decide it's SAFE, state WHY in one concrete sentence (what stops the attack, where).
+     'Looks fine' is not a verdict. A safe judgment you can't justify is an unfinished one - keep
+     looking. Record the reason in the finding/safe-summary so C can check it.
+  4) It may be safe ALONE but not when COMPOSED with other code - a value validated here but
+     re-fetched/re-decoded later, a check in one function and the use in another, a TOCTOU gap.
+     Ask what happens when this unit is chained with others (record leads/links).
+  5) If there's a MITIGATION (sanitizer, encoder, allowlist, type check, auth guard), do NOT
+     assume it works. Ask whether it is bypassable IN THIS language/runtime/framework/OS:
+     type-juggling and loose comparisons, encoding/Unicode normalization and double-decoding,
+     regex anchoring/multiline/ReDoS gaps, parser mismatches (HTTP/URL/JSON/XML differing between
+     filter and sink), canonicalization/path normalization, truncation, integer/precision quirks,
+     locale/charset. The vuln-track skills carry the per-language bypass catalogs - consult them
+     before trusting a guard.
+Apply these to interesting units, not every trivial line. A finding can come from question 2/4/5
+even when question 1 alone looked safe.
 $DYN"
 
 MISSION_A="You are PRODUCER A of a white-box security assessment. Focus ONLY on
