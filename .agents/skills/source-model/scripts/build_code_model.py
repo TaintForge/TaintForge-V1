@@ -17,6 +17,15 @@ import argparse, ast, collections, datetime as _dt, hashlib, json, os, re, sys
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
+# tree-sitter extractor (real AST for non-python langs; catches dynamic dispatch regex can't).
+# Falls back to regex if unavailable or disabled. Toggle off with TF_NO_TREESITTER=1.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+try:
+    import ts_extract as _ts
+    _TS_ON = (os.environ.get("TF_NO_TREESITTER","") not in ("1","true","yes")) and _ts.ts_available()
+except Exception:
+    _ts=None; _TS_ON=False
+
 EXT_LANG = {".py":"python",".js":"javascript",".mjs":"javascript",".cjs":"javascript",
     ".jsx":"javascript",".ts":"typescript",".tsx":"tsx",".java":"java",".go":"go",".rb":"ruby",
     ".php":"php",".cs":"c_sharp",".c":"c",".h":"c",".cpp":"cpp",".cc":"cpp",".hpp":"cpp",
@@ -297,9 +306,25 @@ def extract_ruby_symbols(rel,lang,text,existing):
                     if sym["id"] not in existing: symbols.append(sym); existing.add(sym["id"])
     return symbols
 
+_TS_CALLSITES={}  # rel -> callsites from tree-sitter (consumed by extract_callsites)
+
 def extract_symbols_and_imports(rel,lang,text):
-    if lang=="python": symbols,imports=extract_python_symbols(rel,lang,text)
-    else: symbols,imports=extract_generic_symbols(rel,lang,text),[]
+    if lang=="python":
+        symbols,imports=extract_python_symbols(rel,lang,text)
+    elif _TS_ON and _ts and _ts._parser(lang) is not None:
+        module=rel_module(rel)
+        try:
+            res=_ts.extract(rel,lang,text,module,make_symbol,classify_sink,KEYWORDS)
+        except Exception:
+            res=None
+        if res is not None:
+            symbols,ts_calls=res
+            _TS_CALLSITES[rel]=ts_calls          # reuse the same parse for callsites
+            imports=[]
+        else:
+            symbols,imports=extract_generic_symbols(rel,lang,text),[]   # parse failed -> regex
+    else:
+        symbols,imports=extract_generic_symbols(rel,lang,text),[]
     imports.extend(extract_imports(rel,lang,text))
     return symbols,imports
 
@@ -354,6 +379,24 @@ def classify_sink(callee,receiver=""):
     return SINK_BY_NAME.get(dotted.lower(),"") or SINK_BY_NAME.get(c,"")
 
 def extract_callsites(file_info):
+    rel=file_info["rel"]; symbols=file_info["symbols"]; text=file_info["text"]
+    # If tree-sitter already produced callsites for this file (real AST, incl. dynamic dispatch),
+    # use them - just fill in the id/caller_symbol fields build_code_model expects.
+    ts_calls=_TS_CALLSITES.get(rel)
+    if ts_calls is not None:
+        out=[]
+        for c in ts_calls:
+            line_no_=c["line"]; short=normalize_callee(c["callee"]) or c["callee"]
+            caller_name=c.get("caller_name","")
+            caller=None
+            for s in symbols:
+                if s["qualified_name"]==caller_name: caller=s; break
+            if caller is None: caller=containing_symbol(symbols,line_no_)
+            out.append({"id":f"{rel}:{line_no_}:{sha1_short((c.get('receiver','') or '')+':'+short+':'+c.get('raw',''),8)}",
+                "file":rel,"line":line_no_,"caller_symbol":caller["id"],"caller_name":caller["qualified_name"],
+                "callee":short,"receiver":c.get("receiver","") or "","raw":c.get("raw","")[:240],
+                "syntax":c.get("syntax",""),"sink_category":c.get("sink_category","") or ""})
+        return out
     rel=file_info["rel"]; symbols=file_info["symbols"]; text=file_info["text"]
     lines=text.splitlines(); out=[]; seen=set()
     member_re=re.compile(r"(?P<receiver>\$?[A-Za-z_$][\w$]*)(?:\s*(?:\.|->|::)\s*)(?P<name>[A-Za-z_$][\w$]*)\s*\(")

@@ -12,7 +12,7 @@
 #   ./start.sh -u http://127.0.0.1:31655 targets/gitlab
 # Detach: Ctrl-b then d.  Re-attach: tmux attach -t taintforge
 # Stop:   touch workspace/_stop; kill $(cat workspace/_pids); pkill -f 'codex exec'; tmux kill-session -t taintforge
-set -uo pipefail
+set -Eeuo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 SESS="taintforge"
 S=".agents/skills"
@@ -23,8 +23,9 @@ mkdir -p workspace
 # spawn sessions + seed (returns immediately; fds detached so background supervisors
 # can't hold this shell open)
 SPAWN_ONLY=1 "$HERE/audit.sh" "$@" </dev/null >workspace/_spawn.log 2>&1 || { echo "spawn failed - see workspace/_spawn.log"; exit 1; }
+[ -s workspace/_pids ] || { echo "spawn failed - workspace/_pids was not created; see workspace/_spawn.log"; exit 1; }
 
-tmux kill-session -t "$SESS" 2>/dev/null
+tmux kill-session -t "$SESS" 2>/dev/null || true
 
 DASH="python3 $S/convergence/scripts/dashboard.py"
 # logs: whitebox A/B; C/D shared.
@@ -38,16 +39,49 @@ P_C=$(tmux split-window -v -t "$P_A" -P -F '#{pane_id}' "$(mklog C)")
 P_D=$(tmux split-window -v -t "$P_B" -P -F '#{pane_id}' "$(mklog D)")
 P_DASH=$(tmux split-window -v -t "$P_C" -P -F '#{pane_id}' "$DASH")
 tmux select-layout -t "$SESS:forge" tiled
+tmux set -t "$SESS" default-terminal "tmux-256color"
+tmux set -t "$SESS" status on
+tmux set -t "$SESS" status-position bottom
+tmux set -t "$SESS" status-interval 2
+tmux set -t "$SESS" status-justify centre
+tmux set -t "$SESS" status-style "bg=colour232,fg=colour245"
+tmux set -t "$SESS" status-left-length 64
+tmux set -t "$SESS" status-right-length 96
+tmux set -t "$SESS" status-left "#[bg=colour44,fg=black,bold]  TaintForge  #[bg=colour232,fg=colour44]▌ #[fg=colour247]#{session_name} "
+tmux set -t "$SESS" status-right "#[fg=colour241]findings #[fg=colour44,bold]#(find workspace/findings -maxdepth 1 -name '*.json' 2>/dev/null | wc -l | tr -d ' ') #[fg=colour238]│ #[fg=colour245]%Y-%m-%d #[fg=colour44,bold]%H:%M "
+tmux set -t "$SESS" window-status-separator ""
+tmux set -t "$SESS" window-status-style "bg=colour232,fg=colour241"
+tmux set -t "$SESS" window-status-format "#[bg=colour232,fg=colour241]  #I:#W  "
+tmux set -t "$SESS" window-status-current-format "#[bg=colour236,fg=colour44,bold]  #I:#W  "
+tmux set -t "$SESS" message-style "bg=colour236,fg=colour255"
+tmux set -t "$SESS" message-command-style "bg=colour236,fg=colour255"
+tmux set -t "$SESS" mode-style "bg=colour44,fg=black,bold"
+tmux set -t "$SESS" clock-mode-colour colour44
+tmux set -t "$SESS" display-panes-active-colour colour44
+tmux set -t "$SESS" display-panes-colour colour238
+tmux set -t "$SESS" pane-border-style "bg=black,fg=colour235"
+tmux set -t "$SESS" pane-active-border-style "bg=black,fg=colour44"
+tmux set -t "$SESS" pane-border-lines single
 tmux set -t "$SESS" pane-border-status top
-tmux set -t "$SESS" pane-border-format " #[bold]#{?pane_active,#[fg=colour44],#[fg=colour245]}#{pane_title} "
-tmux select-pane -t "$P_A" -T "🅐 INJECT / data-flow (A)"
-tmux select-pane -t "$P_B" -T "🅑 LOGIC / access-control (B)"
-tmux select-pane -t "$P_C" -T "🅒 CONVERGE / reproduce (C)"
-tmux select-pane -t "$P_D" -T "🅓 EXPLOIT / weaponize (D)"
-tmux select-pane -t "$P_DASH" -T "📊 DASHBOARD"
+tmux setw -t "$SESS:forge" remain-on-exit on
+tmux setw -t "$SESS:forge" window-style "bg=black,fg=colour250"
+tmux setw -t "$SESS:forge" window-active-style "bg=black,fg=colour252"
+tmux set -t "$SESS" pane-border-format "#{?pane_active,#[bg=colour44,fg=black,bold],#[bg=colour235,fg=colour245]}  #{pane_title}  #[default]"
+tmux select-pane -t "$P_A" -T "A  INJECT / data-flow"
+tmux select-pane -t "$P_B" -T "B  LOGIC / access-control"
+tmux select-pane -t "$P_C" -T "C  CONVERGE / reproduce"
+tmux select-pane -t "$P_D" -T "D  EXPLOIT / weaponize"
+tmux select-pane -t "$P_DASH" -T "DASHBOARD"
 FOCUS="$P_C"
 tmux set -t "$SESS" mouse on
 tmux select-pane -t "$FOCUS"
+
+PANES=$(tmux list-panes -t "$SESS:forge" -F '#{pane_id}' | wc -l | tr -d ' ')
+[ "$PANES" = "5" ] || {
+  echo "tmux setup failed - expected 5 panes, got $PANES" >&2
+  tmux list-panes -t "$SESS:forge" -F '#{pane_index} #{pane_id} #{pane_title} #{pane_current_command}' >&2 || true
+  exit 1
+}
 
 echo "tmux '$SESS' ready (labels bound to panes by id). Attaching... Ctrl-b d to detach."
 sleep 1

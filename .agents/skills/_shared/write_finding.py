@@ -34,7 +34,14 @@ def main():
     f = json.loads(raw)
 
     f.setdefault("track", "B")
-    f.setdefault("detector", "llm-track-b" if f["track"] == "B" else "llm-track-a")
+    detector_by_track = {
+        "A": "llm-track-a", "B": "llm-track-b",
+        "F": "llm-track-f", "G": "llm-track-g",
+        "H": "llm-track-h", "I": "llm-track-i",
+        "J": "llm-track-j", "K": "llm-track-k", "L": "llm-track-l",
+        "M": "llm-track-m", "N": "llm-track-n", "W": "llm-track-w",
+    }
+    f.setdefault("detector", detector_by_track.get(f["track"], "llm-track-a"))
     f.setdefault("status", "candidate")
     # retry cap: count how many times this finding is bounced to needs_reanalysis, so C can
     # stop re-verifying it forever (burns reasoning tokens). Incremented on each such update.
@@ -51,7 +58,7 @@ def main():
     f.setdefault("created_at", now())
     f["updated_at"] = now()
     hist = f.get("history", [])
-    stage = "track-b" if f["track"] == "B" else "track-a"
+    stage = f"track-{str(f['track']).lower()}"
     hist.append({"stage": stage, "action": f.get("_action", "authored by LLM"), "ts": now()})
     f["history"] = hist
     f.pop("_action", None)

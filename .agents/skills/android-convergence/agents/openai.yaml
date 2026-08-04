@@ -1,0 +1,4 @@
+interface:
+  display_name: "Android Convergence"
+  short_description: "Reproduce Android findings on safe emulators"
+  default_prompt: "Use $android-convergence to validate and reproduce Android findings on an authorized emulator."

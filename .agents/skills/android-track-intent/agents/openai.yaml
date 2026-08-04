@@ -1,0 +1,4 @@
+interface:
+  display_name: "Android Intent Track"
+  short_description: "Trace deep links and unsafe Android intents"
+  default_prompt: "Use $android-track-intent to audit exported components, deep links, and intent flows."

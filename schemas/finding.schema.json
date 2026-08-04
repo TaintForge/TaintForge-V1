@@ -32,9 +32,15 @@
         "F",
         "G",
         "H",
-        "I"
+        "I",
+        "J",
+        "K",
+        "L",
+        "M",
+        "N",
+        "W"
       ],
-      "description": "A/F/H = data-flow, blackbox injection, or web3 fund-flow; B/G/I = logic/authz, blackbox logic, or web3 access-control."
+      "description": "A/F/H = web data-flow, blackbox injection, or web3 fund-flow; B/G/I = web logic/authz, blackbox logic, or web3 access-control; Android tracks: M manifest/permissions, L component types/IPC, K cross-component sink chains, W WebView, N native/passive zero-click, J legacy Android Intent/deep-link."
     },
     "vuln_class": {
       "type": "string",
@@ -69,7 +75,13 @@
         "llm-track-f",
         "llm-track-g",
         "llm-track-h",
-        "llm-track-i"
+        "llm-track-i",
+        "llm-track-j",
+        "llm-track-k",
+        "llm-track-l",
+        "llm-track-m",
+        "llm-track-n",
+        "llm-track-w"
       ],
       "description": "What produced/confirmed this finding."
     },
@@ -193,7 +205,155 @@
         },
         "poc_script": {
           "type": "string",
-          "description": "Full, self-contained Python source of a poc.py that reproduces THIS vuln when run (uses requests). The agent writes it to fit the actual vuln: pre-auth needs no login; multi-step flows have as many requests as needed. Saved verbatim to report/<id>/poc.py."
+          "description": "Full, self-contained Python source of a poc.py that reproduces THIS vuln when run. Web PoCs normally use requests; Android PoCs invoke the repository's emulator-only probe harness. Saved verbatim to report/<id>/poc.py."
+        }
+      }
+    },
+    "android": {
+      "type": "object",
+      "description": "Android-specific reachability and reproduction context.",
+      "additionalProperties": false,
+      "properties": {
+        "package": {
+          "type": "string"
+        },
+        "component": {
+          "type": "string"
+        },
+        "component_type": {
+          "type": "string",
+          "enum": [
+            "activity",
+            "activity-alias",
+            "service",
+            "receiver",
+            "provider",
+            "binder",
+            "pending-intent",
+            "webview",
+            "native",
+            "other"
+          ]
+        },
+        "min_sdk": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "target_sdk": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "api_level": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "abi": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "image_digest": {
+          "type": "string"
+        },
+        "original_sha256": {
+          "type": "string"
+        },
+        "signature_mode": {
+          "type": "string",
+          "enum": [
+            "original",
+            "test-signed",
+            "instrumented",
+            "unknown"
+          ]
+        },
+        "delivery": {
+          "type": "string"
+        },
+        "interaction": {
+          "type": "string",
+          "enum": [
+            "none",
+            "click",
+            "open-file",
+            "install-local-app",
+            "next-app-launch",
+            "unknown"
+          ]
+        },
+        "execution_boundary": {
+          "type": "string",
+          "enum": [
+            "web-account",
+            "javascript-bridge",
+            "app-sandbox",
+            "privileged-app",
+            "system-app",
+            "baseband",
+            "kernel",
+            "unknown"
+          ]
+        },
+        "evidence_grade": {
+          "type": "string",
+          "enum": [
+            "string-lead",
+            "static-path",
+            "controlled-crash",
+            "sink-trace",
+            "researcher-poc",
+            "full-exploit",
+            "in-the-wild"
+          ]
+        },
+        "zero_click_claim": {
+          "type": "string",
+          "enum": [
+            "not-applicable",
+            "candidate",
+            "probable",
+            "confirmed"
+          ]
+        },
+        "intent": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "action": {
+              "type": "string"
+            },
+            "data_uri": {
+              "type": "string"
+            },
+            "flags": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "extras": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "caller": {
+              "type": "string"
+            }
+          }
+        },
+        "instrumentation": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
         }
       }
     },
@@ -217,6 +377,12 @@
               "track-g",
               "track-h",
               "track-i",
+              "track-j",
+              "track-k",
+              "track-l",
+              "track-m",
+              "track-n",
+              "track-w",
               "cross-validation",
               "reproduction",
               "triage",

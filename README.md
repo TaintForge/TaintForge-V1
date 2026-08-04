@@ -282,6 +282,21 @@ Without `network_access` the live probes fail with `Operation not permitted`; wi
 Sessions auto-respawn until `MAX_HOURS` (default 12) or `workspace/_stop`. To run longer,
 raise `MAX_HOURS=24`. State in `workspace/` persists across runs, so agents dig deeper.
 
+### Android APK mode
+
+Android APKs use a separate six-role pipeline for Manifest/permissions, component-type
+analysis, cross-component sink chains, WebView, native zero-click surfaces, and emulator
+convergence:
+
+```bash
+./android-audit.sh --seed-only targets/app.apk
+./android-audit.sh targets/app.apk
+./android-audit.sh --serial emulator-5554 targets/app.apk
+```
+
+See [docs/ANDROID_WORKFLOW_KR.md](docs/ANDROID_WORKFLOW_KR.md) for the role contract,
+toolchain, evidence grading, and emulator-only safety boundary.
+
 ### Watch progress
 
 With `start.sh` the dashboard pane shows this live. Headless? In a separate shell:

@@ -5,8 +5,8 @@ emit_poc.py - materialize a per-vuln folder for every reproduced/confirmed findi
   workspace/report/<id>/finding.md <- the individual report for that one vulnerability
 
 This script does NOT invent or parse PoC steps. The convergence agent writes a poc.py that
-fits the actual vulnerability (pre-auth = no login; whatever number of requests it takes,
-using requests) and stores the full source in finding.repro.poc_script. We just persist it.
+fits the actual vulnerability (web PoCs typically use requests; Android PoCs invoke the
+emulator-only wrapper) and stores the full source in finding.repro.poc_script. We persist it.
 If poc_script is missing we still write a finding.md and a small stub poc.py noting it's
 absent, so the folder is never empty - but a reproduced finding SHOULD carry poc_script.
 
@@ -18,14 +18,15 @@ EMIT_STATUSES = {"reproduced", "confirmed"}
 
 STUB = '''#!/usr/bin/env python3
 # No poc_script was recorded for finding {id} ({vuln_class}).
-# The convergence agent should author a requests-based poc.py for this vuln and store it
-# in finding.repro.poc_script. See finding.md for the recorded reproduction notes.
+# The convergence agent should author a target-specific poc.py and store it in
+# finding.repro.poc_script. See finding.md for the recorded reproduction notes.
 print("no PoC script recorded for finding {id}")
 '''
 
 def finding_md(f):
     r = f.get("repro", {}) or {}
     d = f.get("disclosure", {}) or {}
+    android = f.get("android", {}) or {}
     src, sink = f.get("source", {}) or {}, f.get("sink", {}) or {}
     L = [f"# {f.get('title','(untitled)')}", "",
          f"- **id**: `{f.get('id')}`  ",
@@ -38,12 +39,20 @@ def finding_md(f):
     L += ["", f"**Data flow**: `{src.get('file','?')}:{src.get('line','?')}` -> `{sink.get('file','?')}:{sink.get('line','?')}`", ""]
     if f.get("evidence"):
         L += ["## Evidence", "", str(f["evidence"]), ""]
+    if android:
+        L += ["## Android context", "",
+              f"- package/component: `{android.get('package','?')}` / `{android.get('component','?')}`  ",
+              f"- type: {android.get('component_type','?')} | delivery: {android.get('delivery','?')}  ",
+              f"- interaction: {android.get('interaction','?')} | boundary: {android.get('execution_boundary','?')}  ",
+              f"- evidence grade: {android.get('evidence_grade','?')} | zero-click: {android.get('zero_click_claim','not-applicable')}  ",
+              f"- API/ABI: {android.get('api_level','?')} / {android.get('abi','?')}  ", ""]
     L += ["## Reproduction", "",
           f"- attempted: {r.get('attempted')} | success: {r.get('success')}"]
     if r.get("observation"): L.append(f"- observation: {r['observation']}")
     if r.get("response"): L.append(f"- response evidence: {r['response']}")
     if r.get("poc"):
-        L += ["", "Recorded request(s):", "```http", str(r["poc"]).strip(), "```"]
+        L += ["", "Recorded request(s):", "```bash" if android else "```http",
+              str(r["poc"]).strip(), "```"]
     ex = f.get("exploit", {}) or {}
     if ex.get("depth"):
         L += ["", "## Exploitation", "",
@@ -56,7 +65,8 @@ def finding_md(f):
         if ex.get("oob_evidence"): L.append(f"- OOB evidence: {ex['oob_evidence']}")
         if ex.get("working_poc","").strip():
             L += ["", "Run the weaponized exploit:", "```bash", "python3 exploit.py", "```"]
-    L += ["", "## Run the PoC", "```bash", "pip install requests   # if needed", "python3 poc.py", "```",
+    run_lines = ["python3 poc.py"] if android else ["pip install requests   # if needed", "python3 poc.py"]
+    L += ["", "## Run the PoC", "```bash", *run_lines, "```",
           "", f"_generated {datetime.datetime.now(datetime.timezone.utc).isoformat()}_"]
     return "\n".join(L)
 

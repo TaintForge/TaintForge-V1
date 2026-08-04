@@ -1,0 +1,4 @@
+interface:
+  display_name: "Android APK Source Model"
+  short_description: "Extract Android APK components and attack surfaces"
+  default_prompt: "Use $android-source-model to build an Android APK attack-surface model."

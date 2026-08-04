@@ -15,11 +15,13 @@ Set TF_TOKEN_BUDGET=0 (default) to disable the guard entirely.
 Usage:
   budget_guard.py --check          # exit 0 always; touches _stop if over budget; prints usage
   budget_guard.py --report         # just print cumulative tokens, no side effects
+  budget_guard.py --check --log-glob 'workspace/android/_log_*.txt' \
+      --stop workspace/_android_stop
 """
 import argparse, glob, os, re, sys
 
-LOG_GLOB="workspace/_log_*.txt"
-STOP="workspace/_stop"
+DEFAULT_LOG_GLOB="workspace/_log_*.txt"
+DEFAULT_STOP="workspace/_stop"
 TOKEN_PATTERNS=[
     re.compile(r"total[_ ]tokens[\"']?\s*[:=]\s*([0-9,]+)", re.I),
     re.compile(r"tokens?[_ ]used[\"']?\s*[:=]\s*([0-9,]+)", re.I),
@@ -27,9 +29,9 @@ TOKEN_PATTERNS=[
     re.compile(r"\"(?:input|output|total)_tokens\"\s*:\s*([0-9,]+)", re.I),
 ]
 
-def cumulative_tokens():
+def cumulative_tokens(log_glob):
     total=0; hits=0
-    for path in glob.glob(LOG_GLOB):
+    for path in glob.glob(log_glob):
         try: txt=open(path, errors="ignore").read()
         except Exception: continue
         for pat in TOKEN_PATTERNS:
@@ -42,16 +44,18 @@ def main():
     ap=argparse.ArgumentParser()
     ap.add_argument("--check", action="store_true")
     ap.add_argument("--report", action="store_true")
+    ap.add_argument("--log-glob", default=DEFAULT_LOG_GLOB)
+    ap.add_argument("--stop", default=DEFAULT_STOP)
     a=ap.parse_args()
     budget=int(os.environ.get("TF_TOKEN_BUDGET","0"))
-    total, hits = cumulative_tokens()
+    total, hits = cumulative_tokens(a.log_glob)
     if a.report or not a.check:
         print(f"[budget] cumulative tokens ~= {total:,} (from {hits} log markers); "
               f"budget={'off' if budget==0 else format(budget,',')}")
         if not a.check: return
     if budget>0 and hits>0 and total>=budget:
-        open(STOP,"w").close()
-        print(f"[budget] OVER BUDGET: ~{total:,} >= {budget:,} -> touched {STOP} (winding down)")
+        open(a.stop,"w").close()
+        print(f"[budget] OVER BUDGET: ~{total:,} >= {budget:,} -> touched {a.stop} (winding down)")
     else:
         why="disabled" if budget==0 else ("no token markers in logs (fail-open)" if hits==0 else f"~{total:,} / {budget:,}")
         print(f"[budget] under budget ({why})")

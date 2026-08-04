@@ -15,3 +15,11 @@ accounts.json
 
 *.jar
 
+
+.tools/
+
+asdf-workspace/
+
+.codex-security/
+
+claude-agent/
