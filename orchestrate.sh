@@ -1,3 +1,3 @@
 #!/usr/bin/env bash
-# Deprecated shell-loop driver. Replaced by a single autonomous Codex mission. Forwards to audit.sh.
+# Deprecated entry point. audit.sh now runs one root Codex orchestrator with custom subagents.
 exec "$(dirname "$0")/audit.sh" "$@"

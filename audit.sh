@@ -1,50 +1,88 @@
 #!/usr/bin/env bash
-# Streaming producer-consumer: four parallel autonomous Codex sessions sharing the
-# findings queue (workspace/findings/).
-#   A (producer) - injection / data-flow
-#   B (producer) - logic / access-control (IDOR, authz, ...)
-#   C (consumer) - cross-validate + reproduce + triage, continuously
-#   D (exploitation) - weaponize the critical findings C already proved
-# Each is ONE long self-looping session (no shell re-invoking Codex per module).
-# write_finding.py is file-locked so the four never corrupt the same finding.
+# TaintForge white-box orchestrator.
+#
+# One root Codex session owns four project-scoped custom subagents:
+#   producer_a     - injection / data-flow
+#   producer_b     - logic / access-control
+#   convergence_c  - cross-validation, reproduction, disclosure, and triage
+#   exploitation_d - weaponization of proven critical findings
+#
+# The role definitions live in .codex/agents/*.toml. The shell only seeds deterministic
+# artifacts, prepares optional live-target context, and supervises the root orchestrator.
 #
 # Usage:
-#   ./audit.sh targets/<app>                         # static only (no live server)
-#   ./audit.sh -u http://localhost:8080 targets/<app>  # + dynamic reproduction/analysis
+#   ./audit.sh targets/<app>
+#   ./audit.sh -u http://localhost:8080 targets/<app>
 #   ./audit.sh --url http://host --accounts creds.json targets/<app>
-#
-# When --url is given, accounts.json (array of {username,password}) is passed to the
-# sessions so they can authenticate (Codex figures out the login flow itself) and
-# reproduce auth/IDOR issues by replaying as different users. Default accounts file:
-# ./accounts.json in the repo root.
-set -uo pipefail
+set -Eeuo pipefail
 
-URL=""; ACCOUNTS="accounts.json"; TARGET=""
-while [ $# -gt 0 ]; do
+ROOT="$(cd "$(dirname "$0")" && pwd)"
+cd "$ROOT"
+
+URL=""
+ACCOUNTS="accounts.json"
+TARGET=""
+
+usage() {
+  cat <<'EOF'
+usage: ./audit.sh [-u URL] [--accounts FILE] targets/<app>
+
+One supervised root Codex orchestrator manages the producer_a, producer_b,
+convergence_c, and exploitation_d project custom subagents.
+EOF
+}
+
+while [ "$#" -gt 0 ]; do
   case "$1" in
-    -u|--url)      URL="$2"; shift 2;;
-    --accounts)    ACCOUNTS="$2"; shift 2;;
-    -h|--help)     grep '^#' "$0" | sed 's/^# \{0,1\}//'; exit 0;;
-    -*)            echo "unknown option: $1" >&2; exit 2;;
-    *)             TARGET="$1"; shift;;
+    -u|--url) URL="${2:?missing URL}"; shift 2 ;;
+    --accounts) ACCOUNTS="${2:?missing accounts path}"; shift 2 ;;
+    -h|--help) usage; exit 0 ;;
+    -*) echo "unknown option: $1" >&2; usage >&2; exit 2 ;;
+    *) TARGET="$1"; shift ;;
   esac
 done
-# TARGET (source dir) is required.
-[ -n "$TARGET" ] || { echo "usage: ./audit.sh [-u URL] [--accounts FILE] targets/<app>"; exit 2; }
+
+[ -n "$TARGET" ] || {
+  usage >&2
+  exit 2
+}
+TARGET_REAL="$(realpath -e -- "$TARGET" 2>/dev/null)" || {
+  echo "error: target does not exist: $TARGET" >&2
+  exit 2
+}
+case "$TARGET_REAL" in
+  "$ROOT"/targets/*) ;;
+  *) echo "error: target must be under targets/: $TARGET" >&2; exit 2 ;;
+esac
+TARGET="$(realpath --relative-to="$ROOT" "$TARGET_REAL")"
 
 S=".agents/skills"
 CODEX_CMD="${CODEX_CMD:-codex exec --sandbox workspace-write}"
-# Consumer C does reproduction/cross-validation/PoC - the reasoning-heavy role - so default it
-# to gpt-5.4. Override via .env or env (CODEX_CMD_C=...); falls back to CODEX_CMD if you blank it.
-CODEX_CMD_C="${CODEX_CMD_C:-codex exec --sandbox workspace-write --config sandbox_workspace_write.network_access=true --config web_search=live --model gpt-5.4}"
-mkdir -p workspace/findings workspace/hints workspace/report
+MAX_HOURS="${MAX_HOURS:-12}"
+SPAWN_ONLY="${SPAWN_ONLY:-0}"
+[[ "$MAX_HOURS" =~ ^[1-9][0-9]*$ ]] || {
+  echo "error: MAX_HOURS must be a positive integer" >&2
+  exit 2
+}
+
+required_agent_files=(
+  .codex/config.toml
+  .codex/agents/producer_a.toml
+  .codex/agents/producer_b.toml
+  .codex/agents/convergence_c.toml
+  .codex/agents/exploitation_d.toml
+)
+for agent_file in "${required_agent_files[@]}"; do
+  [ -f "$agent_file" ] || { echo "error: missing custom-agent config: $agent_file" >&2; exit 2; }
+done
+
+mkdir -p workspace/findings workspace/hints workspace/report workspace/cm
 
 echo "== seed (no LLM): structural model + module split + domain hypotheses =="
-[ -f .env ] && set -a && . ./.env && set +a   # load SSRF_HOST/PORT, CWE_XML if present
-# Whitebox SEED: structural code model + module split.
+[ -f .env ] && set -a && . ./.env && set +a
 "$S/source-model/scripts/build_code_model.sh" "$TARGET" || true
 python3 "$S/source-model/scripts/coverage.py" --init "$TARGET" || true
-# auto-merge CWE-derived hypotheses once (if CWE_XML points at a real file and not merged yet)
+
 CAT="$S/hypothesize/scripts/catalog.json"
 if [ -n "${CWE_XML:-}" ] && [ -f "$CWE_XML" ]; then
   if ! grep -q "\"source_file\": \"$(basename "$CWE_XML")\"" "$CAT" 2>/dev/null; then
@@ -52,316 +90,125 @@ if [ -n "${CWE_XML:-}" ] && [ -f "$CWE_XML" ]; then
     python3 "$S/hypothesize/scripts/cwe_to_hypotheses.py" "$CWE_XML" --catalog "$CAT" || true
   fi
 fi
-# Seed business-logic hypotheses (domain inferred from target name + entry points).
 python3 "$S/hypothesize/scripts/gen_hypotheses.py" --target "$TARGET" || true
 
-# ---- live-target / accounts context (only if --url given) ----
-DYN=""; ACCT_NOTE=""
+PCAN=""
+DYNAMIC_CONTEXT="No live instance was provided. Perform static analysis only. When a finding
+needs dynamic proof, record that limitation honestly instead of guessing."
 if [ -n "$URL" ]; then
   if [ -f "$ACCOUNTS" ]; then
-    # stash accounts where the sessions can read them; tell them the path, not the secrets inline
     cp "$ACCOUNTS" workspace/_accounts.json
-    N=$(python3 -c "import json;print(len(json.load(open('workspace/_accounts.json'))))" 2>/dev/null || echo "?")
-    ACCT_NOTE="Test accounts ($N) are in workspace/_accounts.json as a JSON array of
-{username, password}. Log in via the running app to get a session/cookie/token - YOU work
-out the auth flow from the code (login route, CSRF token, cookie name). For access-control
-tests, authenticate as two different accounts and replay one's request with the other's
-session to prove (or disprove) IDOR/authz bugs."
+    ACCOUNT_COUNT="$(python3 -c "import json; print(len(json.load(open('workspace/_accounts.json'))))" 2>/dev/null || echo '?')"
+    ACCOUNT_CONTEXT="Test accounts ($ACCOUNT_COUNT) are in workspace/_accounts.json. Derive the
+login route, CSRF flow, and session format from the target code. Use separate sessions for
+different identities when reproducing access-control findings."
   else
-    ACCT_NOTE="No accounts file found at $ACCOUNTS - reproduce only what is reachable
-unauthenticated, and note where authenticated testing is needed."
+    ACCOUNT_CONTEXT="No accounts file was found at $ACCOUNTS. Test only unauthenticated surfaces
+and record where authenticated reproduction remains unavailable."
   fi
-  # out-of-band canary for SSRF/blind confirmation.
-  # SSRF_HOST/SSRF_PORT come from .env (loaded in the seed step) so callbacks use an
-  # externally-reachable address the target (often in its own container/network) can reach.
+
   CANARY_PORT="${SSRF_PORT:-${CANARY_PORT:-9111}}"
   CANARY_HOST="${SSRF_HOST:-${CANARY_HOST:-127.0.0.1}}"
   python3 "$S/convergence/scripts/canary.py" serve --port "$CANARY_PORT" \
-      --log workspace/_canary.log > workspace/_log_canary.txt 2>&1 &  PCAN=$!
-  DYN="A LIVE INSTANCE of the target is running at: $URL
-Use it for dynamic reproduction. Send requests with
-.agents/skills/convergence/scripts/probe.py (it keeps sessions via --jar FILE; e.g.
-probe.py -X GET \"$URL/<path>\" --jar a.jar). $ACCT_NOTE
-An OUT-OF-BAND CANARY is running on port $CANARY_PORT and is reachable from the target at
-http://$CANARY_HOST:$CANARY_PORT (externally-routable). For SSRF/blind bugs make the target
-fetch http://$CANARY_HOST:$CANARY_PORT/<uniqueToken> via the vulnerable param (get the URL
-with .agents/skills/convergence/scripts/canary.py url <uniqueToken>), then run
-.agents/skills/convergence/scripts/canary.py check <uniqueToken> - a HIT proves SSRF
-out-of-band. For internal/blind SSRF without a callback, compare responses to
-http://127.0.0.1:<internalport> or http://169.254.169.254/ instead.
-Only send requests to $URL and the canary - never any other host."
-  echo "== live target: $URL  | accounts: $([ -f "$ACCOUNTS" ] && echo "$ACCOUNTS ($N)" || echo none)  | canary: $CANARY_HOST:$CANARY_PORT =="
+    --log workspace/_canary.log > workspace/_log_canary.txt 2>&1 &
+  PCAN=$!
+  DYNAMIC_CONTEXT="The only authorized live target is $URL.
+$ACCOUNT_CONTEXT
+An out-of-band canary is available at http://$CANARY_HOST:$CANARY_PORT. Use probe.py,
+browser_probe.py, and canary.py as directed by the role skills. Never send traffic to any
+other host."
+  echo "== live target: $URL | accounts: $ACCOUNT_CONTEXT | canary: $CANARY_HOST:$CANARY_PORT =="
 else
-  DYN="No live instance was provided (no --url). Do static analysis only; when a finding
-needs dynamic proof, set status needs_reanalysis with a note that it requires a running
-server, instead of guessing."
-  echo "== no --url: static-only mode (dynamic reproduction disabled) =="
+  echo "== no --url: static-only mode =="
 fi
 
-COMMON="targets/ is READ-ONLY; never modify it. Your persistent memory is workspace/ -
-use it as a notebook so you go DEEPER across iterations instead of repeating. Findings are
-authored ONLY by you via .agents/skills/_shared/write_finding.py (file-locked,
-safe for parallel writers). Read workspace/findings/ before writing so you don't duplicate.
-coverage.py models the codebase as a TREE (directory -> module -> entry point). Drive your
-sweep with .agents/skills/source-model/scripts/coverage.py: --next gives the next pending
-module ATTACK-SURFACE FIRST (modules exposing routes/handlers before leaf libraries); --tree
-shows each module's entry points (the routes an attacker can actually reach). Analyze every
-module, but start from those with entry points and trace inward from each route. For each
-module either record a finding or justify why it's safe, then coverage.py --done <module>.
-The repo-wide CODE_MODEL.json may be a GRAPH-ONLY global index (symbols + entry points; edges
-split to call_graph.json, no dataflow/proof_ledger) when the target is large - check stats.mode.
-Whole-repo graph queries (--sinks/--trace/--forward) intentionally won't work on it (they'd OOM
-on a big repo). To analyze a module, build the FULL model SCOPED to that module:
-  python3 .agents/skills/source-model/scripts/build_code_model.py <module_path> -o workspace/cm/<m>.json
-That writes module-scoped artifacts next to it (workspace/cm/<m>.dataflow.json,
-workspace/cm/<m>.proof_ledger.json, etc - prefixed so they don't clobber the global ones).
-Then query that module model:
-  python3 .agents/skills/source-model/scripts/callgraph.py --model workspace/cm/<m>.json --sinks|--trace|--forward
-  python3 .agents/skills/source-model/scripts/proof_ledger.py --ledger workspace/cm/<m>.proof_ledger.json --next sink
-The global index is for resolving cross-module calls and locating entry points; the per-module
-full build is where you do deep path/sink/proof work.
-You don't get tired - keep going until repeated passes find nothing new.
+ORCHESTRATOR_PROMPT="You are the root orchestrator for an authorized TaintForge white-box
+assessment. Do not perform producer, convergence, or exploitation analysis yourself.
 
-DEPTH OVER BREADTH on interesting code. Most code is shallow - check it and move on. But when
-you hit code that PARSES, DESERIALIZES, DISPATCHES on a name/string, does reflection/metaprogramming,
-walks user-controlled property paths, or transforms input through several steps, do NOT just ask
-'is there a known sink here'. Read that function line by line and ask, at EACH step: 'if the
-attacker controls this value, what does that let me do next?' Then carry that capability forward
-and ask again. Real bugs are often a CHAIN of individually-harmless steps (a raw reference here,
-a missing check there, a reachable constructor at the end) that only become a vulnerability when
-combined - no single line is 'the sink'.
-To support this, use the deep-analysis notebook .agents/skills/_shared/leads.py:
-  - record an interesting-but-not-yet-a-bug observation as a LEAD (echo JSON | leads.py add,
-    kind=lead) with what it ENABLES. Record a confirmed capability as a PRIMITIVE (kind=primitive).
-  - keep a running note on a target you're digging: leads.py note <target> --set 'understood X;
-    hold capability Y; next try Z' - so a respawn continues the dig instead of restarting.
-  - read leads.py open / list before you stop: can two leads COMBINE into something bigger?
-    leads.py link <id> <id> records a candidate chain for the consumer/exploitation sessions.
-  A lead is not a finding - only write_finding.py when you can state a concrete vulnerability
-  (possibly built FROM several leads). But don't discard a lead just because it isn't a bug yet;
-  it may be the missing piece of a chain another session finds.
-You don't get tired - keep going until repeated passes find nothing new.
-Also read workspace/HYPOTHESES.json: for each open hypothesis verify it against the code; if
-confirmed, write a finding and set its hypothesis_id, then mark the hypothesis verified; if
-disproved, mark it refuted with a one-line reason. These are intent-level (business-logic)
-attacks to check alongside your pattern scan.
-INTERROGATE EACH CODE UNIT - don't judge in a single direction. Following a sink backward to a
-source and checking for a guard is ONE question; a real reviewer asks several at once about the
-same code, and a verdict isn't done until they're answered:
-  1) Is this directly vulnerable on the obvious path?
-  2) Is it reachable by a DIFFERENT entry point or flow where the assumptions don't hold? The
-     same function called from an admin path, a webhook, a queue worker, an internal RPC, a
-     retry, or a different role may not have the guard the obvious caller does. Don't analyze
-     one caller and generalize.
-  3) If you decide it's SAFE, state WHY in one concrete sentence (what stops the attack, where).
-     'Looks fine' is not a verdict. A safe judgment you can't justify is an unfinished one - keep
-     looking. Record the reason in the finding/safe-summary so C can check it.
-  4) It may be safe ALONE but not when COMPOSED with other code - a value validated here but
-     re-fetched/re-decoded later, a check in one function and the use in another, a TOCTOU gap.
-     Ask what happens when this unit is chained with others (record leads/links).
-  5) If there's a MITIGATION (sanitizer, encoder, allowlist, type check, auth guard), do NOT
-     assume it works. Ask whether it is bypassable IN THIS language/runtime/framework/OS:
-     type-juggling and loose comparisons, encoding/Unicode normalization and double-decoding,
-     regex anchoring/multiline/ReDoS gaps, parser mismatches (HTTP/URL/JSON/XML differing between
-     filter and sink), canonicalization/path normalization, truncation, integer/precision quirks,
-     locale/charset. The vuln-track skills carry the per-language bypass catalogs - consult them
-     before trusting a guard.
-Apply these to interesting units, not every trivial line. A finding can come from question 2/4/5
-even when question 1 alone looked safe.
-$DYN"
+Immediately spawn exactly these four project custom agents in parallel, selecting each agent by
+its exact configured name and using the matching task name:
+1. producer_a
+2. producer_b
+3. convergence_c
+4. exploitation_d
 
-MISSION_A="You are PRODUCER A of a white-box security assessment. Focus ONLY on
-INJECTION / DATA-FLOW vulnerabilities: SQL injection, command/code injection, XSS, SSRF,
-path traversal, file inclusion, deserialization, XXE, SSTI, NoSQL, open redirect.
+Give every child this runtime context:
+- Repository root: $ROOT
+- Read-only assessment target: $TARGET
+- Shared persistent queue and notebook: $ROOT/workspace
+- Stop flag: $ROOT/workspace/_stop
+- $DYNAMIC_CONTEXT
 
-VULNERABILITIES LIVE ON FLOWS ACROSS FILES, not in one line. Work sink-first and trace
-backward across function/file/module boundaries - a call that looks safe in one file is
-often fed tainted input several calls away. The whole-repo CODE_MODEL.json is a GRAPH-ONLY
-index on a big target (no inline edges), so build the FULL model for the MODULE you are
-analyzing (from coverage.py --next) and query THAT:
-  python3 .agents/skills/source-model/scripts/build_code_model.py <module_path> -o workspace/cm/<m>.json
-  python3 .agents/skills/source-model/scripts/callgraph.py --model workspace/cm/<m>.json --sinks
-  python3 .agents/skills/source-model/scripts/callgraph.py --model workspace/cm/<m>.json --callers <sinkOrFunc>
-  python3 .agents/skills/source-model/scripts/callgraph.py --model workspace/cm/<m>.json --trace <sinkOrFunc> -d 8
-For each dangerous sink (query/exec/system/unserialize/include/eval/file_get_contents/...)
-list its callers, follow the chain back until you reach attacker-controlled input
-(\$_GET/\$_POST/headers/route vars), and judge sanitizers along the WHOLE path. Do NOT mark
-a sink safe by looking at its file alone - check the callers.
+The custom agent's developer instructions define its role. Do not replace a named custom agent
+with a generic worker. Do not let children delegate further work. All four must run concurrently
+and coordinate through workspace/findings plus the leads notebook.
 
-The graph is a function/method-level skeleton, not a taint proof, and the default sink set is
-high-signal only (sql/command/code-eval/deserialization/file-path/ssrf-net/redirect). Find
-language-construct sinks used directly on input (include \$_GET['p'], echo \$input, eval of a
-request value) and output/resource-load sinks by READING the code too - the graph is a
-starting map, not the whole territory.
+Continuously supervise the four child threads. Wait for updates and relay useful cross-role
+evidence when needed. If a child finishes before workspace/_stop exists, send a follow-up task to
+that same child to continue from workspace state; do not create duplicate workers. producer_a and
+producer_b should revisit needs_reanalysis feedback and continue exhaustive coverage.
+convergence_c and exploitation_d must keep polling for newly eligible findings. Never interpret a
+temporarily empty queue as completion. Remain active until the shell terminates this session or
+workspace/_stop appears."
 
-Use the vuln-track-a skill. Optionally pull leads with
-.agents/skills/vuln-track-a/scripts/run_semgrep.sh $TARGET (hints only). When a live URL is
-available, confirm reachability/exploitability against it. Record findings with track=\"A\".
-$COMMON"
+echo "== launching one Codex orchestrator with four custom subagents =="
+DEADLINE=$(( $(date +%s) + MAX_HOURS * 3600 ))
+STOP="workspace/_stop"
+LOG="workspace/_log_orchestrator.txt"
+rm -f "$STOP"
 
-MISSION_B="You are PRODUCER B of a white-box security assessment. Focus ONLY on LOGIC /
-ACCESS-CONTROL vulnerabilities that data-flow tools miss: IDOR/BOLA, missing authorization,
-privilege escalation, authentication/session bypass, and business-logic flaws
-(step-skipping, price/quantity tampering, mass assignment, race conditions).
+supervise_orchestrator() {
+  (
+    child=""
+    stop_child() {
+      if [ -n "$child" ]; then
+        kill "$child" 2>/dev/null || true
+        wait "$child" 2>/dev/null || true
+      fi
+      exit 0
+    }
+    trap stop_child INT TERM
 
-ACCESS-CONTROL BUGS LIVE ON THE PATH FROM AN ENTRY POINT TO A RESOURCE ACCESS. Trace that
-path and check whether an authorization GATE exists ANYWHERE on it. The whole-repo
-CODE_MODEL.json is a GRAPH-ONLY index on a big target, so build the FULL model for the MODULE
-you are analyzing (from coverage.py --next) and query THAT:
-  python3 .agents/skills/source-model/scripts/build_code_model.py <module_path> -o workspace/cm/<m>.json
-  python3 .agents/skills/source-model/scripts/callgraph.py --model workspace/cm/<m>.json --entries
-  python3 .agents/skills/source-model/scripts/callgraph.py --model workspace/cm/<m>.json --forward <handler_symbol> -d 8
-  python3 .agents/skills/source-model/scripts/callgraph.py --model workspace/cm/<m>.json --callers <loaderOrFindFn>
-For each route/action in workspace/_authz_matrix.json and CODE_MODEL comprehension.route_map:
-follow handler -> service -> repository/object-load, and ask along the WHOLE chain: is there
-an authn check, a role/permission check, and an OWNERSHIP/tenant check on the requested
-object id? If a findById/load/getByID is reachable from a route with NO ownership check on
-the path, that is IDOR. Missing role check on a state-changing action is broken authz.
-Don't judge from the handler file alone - follow the calls.
-
-Use the vuln-track-b skill and workspace/_authz_matrix.json as a seed (build it with
-.agents/skills/vuln-track-b/scripts/build_authz_matrix.py). When a live URL and accounts are
-available, PROVE access-control bugs by replaying one account's request with another
-account's session. Record findings with track=\"B\"; if neither code nor a live test can
-confirm, set status needs_reanalysis with reasoning. $COMMON"
-
-MISSION_C="You are the CONSUMER (convergence). Producers A and B run in PARALLEL and stream
-findings into workspace/findings/. Do NOT wait for them. Loop continuously: pick
-candidate/cross_validated findings (highest severity first; prefer findings that carry a
-hypothesis_id - they validate an intent-level business-logic attack from HYPOTHESES.json),
-then
-1) cross-validate: .agents/skills/convergence/scripts/cross_validate.sh $TARGET (PHP falls
-   back to OpenGrep; correlate bumps matches to cross_validated),
-2) reproduce dynamically (only if a live URL is provided) with
-   .agents/skills/convergence/scripts/probe.py. It keeps a SESSION via --jar FILE: log in
-   each account from workspace/_accounts.json into its own jar (find the login route/body
-   from the code yourself), then reuse that jar to hit protected resources. Track A: fire
-   the payload and look for the sink triggering. For XSS specifically, reflection is NOT
-   proof - confirm EXECUTION with .agents/skills/convergence/scripts/browser_probe.py (headless
-   browser; --jar for stored/authed XSS); only executed:true counts as reproduced. Track B (IDOR/authz): with account A's jar,
-   request account B's object/action - if A gets B's data it is confirmed; for priv-esc hit
-   an admin action with a low-priv jar. Update status reproduced/false_positive/
-   needs_reanalysis via write_finding.py --update <id>. ALWAYS attach a PoC: record the
-   exact reproducing command(s) in repro.poc (full probe.py/curl line with payload, headers,
-   --jar - copy-pasteable) and the decisive response in repro.response; for IDOR include
-   both identities' requests. If the live test is inconclusive,
-   set needs_reanalysis (not stuck candidate), with a one-line reason in repro.observation.
-   RETRY CAP: a finding already at reanalysis_count >= 3 (env TF_MAX_REANALYSIS) that you
-   still cannot reproduce - do NOT bounce it again; close it as false_positive with a note
-   that it stayed inconclusive after repeated tries (this stops endless re-verification that
-   burns tokens). Only keep retrying it if NEW evidence (seeded data, license, account) made
-   the surface testable since last attempt.
-3) for any finding you just moved to reproduced/confirmed, WEB-SEARCH whether it is already
-   public: query the target product+version+vuln specifics against CVE/NVD, vendor and
-   GitHub security advisories, changelogs. Set disclosure{status: novel|known|inconclusive,
-   references:[...], rationale} via write_finding.py --update <id>. novel = no public report
-   (potential 0-day). Only search reproduced/confirmed findings, not raw candidates.
-4) for each reproduced/confirmed finding, WRITE a poc.py that reproduces THAT specific vuln
-   using the requests library, and store its full source in repro.poc_script via
-   write_finding.py --update <id>. Make it fit the actual vuln: if it is pre-auth, no login
-   step; otherwise authenticate as needed; use as many requests as the exploit takes; print
-   a clear PASS/FAIL signal. Do NOT assume a fixed login->exploit shape. Then run
-   .agents/skills/convergence/scripts/emit_poc.py to materialize workspace/report/<id>/
-   (poc.py + finding.md), one folder per vulnerability - never merged.
-5) regenerate the rolling index workspace/report/report.md with .agents/skills/convergence/scripts/triage.py.
-6) review deep-analysis chains: run .agents/skills/_shared/leads.py open and leads.py list. When
-   several leads/primitives plausibly COMBINE into a real vulnerability (e.g. a parser quirk +
-   a missing check + a reachable dangerous construct), try to confirm that chain end-to-end
-   against the live target or by reading the code; if it holds, author ONE finding describing the
-   chained vulnerability (cite the lead ids in evidence) and mark those leads promoted. This is
-   how multi-step bugs that no single producer pass would flag get caught.
-DO NOT EVER STOP ON YOUR OWN. Do not check whether producer processes are alive. Do not
-treat an empty queue as completion. If workspace/findings/ has nothing new, sleep ~30s and
-check again - the producers stream findings continuously and new ones arrive over time.
-Never declare the convergence complete and never exit - run as an infinite loop until a
-human kills you. Each cycle: process any candidate/cross_validated findings, then sleep
-and recheck.
-Use the convergence skill. $DYN"
-
-MISSION_D="You are the EXPLOITATION agent. You do NOT find new bugs and you do NOT triage the
-queue. You take findings that the consumer already proved (status reproduced or confirmed)
-and ONLY the genuinely critical classes - rce, command-injection, sql-injection, auth-bypass,
-deserialization, ssrf-to-internal, path-traversal-to-rce, file-upload-to-rce - and turn a
-proof-of-concept into a fully understood, weaponized exploit. Loop continuously:
-1) select: read workspace/findings/*.json; pick status in {reproduced,confirmed} whose
-   vuln_class is one of the critical classes above and whose exploit.depth is missing or
-   'shallow' (skip everything else - low/medium and unproven findings are not your job).
-   Highest severity first. ALSO consider candidate chains from .agents/skills/_shared/leads.py
-   list: when a chain of leads/primitives plausibly composes into a critical primitive (e.g.
-   arbitrary-member-walk + reachable-constructor → code execution), attempt to realize that
-   chain into a working exploit even if no single finding captured it yet - verify each link,
-   and if it works, record it as a weaponized finding citing the lead ids. Multi-step chains
-   are exactly the high-impact bugs a single producer pass misses.
-2) deepen: starting from the existing repro, push the exploit as far as it really goes, and
-   VERIFY each step against the live target ($DYN) or, when no live target, against the code
-   plus a local shell/interpreter model of the sink. Concretely:
-   - chain & escalate: from the proven primitive, reach the highest real impact (e.g. blind
-     SQLi -> data exfic via boolean/time; command-injection limited to one token -> stage a
-     payload file and invoke it by path; SSRF -> hit cloud metadata/internal services with
-     canary.py; auth-bypass -> reach an admin-only action).
-   - defeat mitigations: when a sanitizer/escape/quoting/WAF blocks the obvious payload,
-     analyze EXACTLY what it permits (which bytes/metacharacters survive) and find a working
-     bypass; prove the bypass actually executes, do not hand-wave it.
-   - confirm execution out-of-band where relevant with
-     .agents/skills/convergence/scripts/canary.py (SSRF/blind RCE) or browser_probe.py (XSS->
-     account takeover chains).
-3) record honestly: write the result back with write_finding.py --update <id> into an
-   exploit object: {depth: shallow|chained|weaponized, primitive, max_impact, steps:[...],
-   mitigations_bypassed:[...], constraints:[...], working_poc, oob_evidence}. Do NOT overstate
-   - if the impact is bounded (e.g. only argument-less single-token commands run), say so
-   precisely and record the exact constraint. A correct 'bounded' result is worth more than
-   an exaggerated one.
-4) materialize: write a standalone weaponized exploit as workspace/report/<id>/exploit.py
-   (requests/raw sockets as needed, copy-pasteable, prints PASS plus the captured evidence),
-   separate from C's poc.py, and store its full source in exploit.working_poc.
-NEVER attack a host you were not pointed at; the only live target is the one in $DYN. Treat
-the target as your own lab. DO NOT EVER STOP ON YOUR OWN: if nothing currently qualifies,
-sleep ~45s and re-scan - the consumer keeps promoting findings to reproduced over time. Run
-as an infinite loop until a human kills you. Use the convergence skill. $DYN"
-
-echo "== launching 4 parallel Codex sessions (auto-respawn until deadline / stop) =="
-MAX_HOURS="${MAX_HOURS:-12}"
-DEADLINE=$(( $(date +%s) + MAX_HOURS*3600 ))
-rm -f workspace/_stop
-
-# A codex exec session is NOT infinite - it exits when the agent decides it's done or hits
-# a turn/token limit. For a streaming consumer/producer that's fatal (C "completes" and
-# dies while findings are still coming). So each role runs under a supervisor that RESPAWNS
-# it whenever it exits, until MAX_HOURS or workspace/_stop. Logs are appended across restarts.
-supervise(){ # $1=tag $2=logfile $3=mission  -> echoes supervisor pid
-  # per-role model override: CODEX_CMD_<TAG> (e.g. CODEX_CMD_C) wins over the shared CODEX_CMD,
-  # so you can run, say, C on a different model. Falls back to CODEX_CMD when unset.
-  eval "rolecmd=\${CODEX_CMD_$1:-\$CODEX_CMD}"
-  ( n=0
-    while [ ! -f workspace/_stop ] && [ "$(date +%s)" -lt "$DEADLINE" ]; do
-        n=$((n+1))
-        echo "===== [$(date +%H:%M:%S)] session $1 start #$n ($rolecmd) =====" >> "$2"
-        $rolecmd "$3" >> "$2" 2>&1 </dev/null
-        echo "===== [$(date +%H:%M:%S)] session $1 exited (#$n); respawn in 5s =====" >> "$2"
-        # token budget guard: touches workspace/_stop if cumulative usage over TF_TOKEN_BUDGET
-        python3 "$S/_shared/budget_guard.py" --check >> "$2" 2>&1 || true
-        sleep 5
+    run=0
+    while [ ! -f "$STOP" ] && [ "$(date +%s)" -lt "$DEADLINE" ]; do
+      run=$((run + 1))
+      echo "===== [$(date +%FT%T%z)] orchestrator session #$run =====" >> "$LOG"
+      # CODEX_CMD intentionally remains a shell-style override for compatibility.
+      # shellcheck disable=SC2086
+      $CODEX_CMD "$ORCHESTRATOR_PROMPT" >> "$LOG" 2>&1 </dev/null &
+      child=$!
+      wait "$child" || true
+      child=""
+      python3 "$S/_shared/budget_guard.py" --check >> "$LOG" 2>&1 || true
+      [ -f "$STOP" ] || sleep 5
     done
-    echo "===== [$(date +%H:%M:%S)] session $1 supervisor stopped =====" >> "$2"
-  ) </dev/null >/dev/null 2>&1 & echo $!
+    echo "===== [$(date +%FT%T%z)] orchestrator supervisor stopped =====" >> "$LOG"
+  ) </dev/null >/dev/null 2>&1 &
+  echo "$!"
 }
-P1=$(supervise A workspace/_log_A.txt "$MISSION_A")
-P2=$(supervise B workspace/_log_B.txt "$MISSION_B")
-echo "  A=$P1 (inject)  B=$P2 (logic)"
-PC=$(supervise C workspace/_log_C.txt "$MISSION_C")
-PD=$(supervise D workspace/_log_D.txt "$MISSION_D")
-echo "$P1 $P2 $PC $PD ${PCAN:-}" > workspace/_pids
-echo "  C=$PC  D=$PD  (supervisors; auto-respawn, ${MAX_HOURS}h budget)"
 
-stop_all(){ touch workspace/_stop; kill $P1 $P2 $PC $PD ${PCAN:-} 2>/dev/null; pkill -f "codex exec" 2>/dev/null; }
+PORCH="$(supervise_orchestrator)"
+printf '%s%s\n' "$PORCH" "${PCAN:+ $PCAN}" > workspace/_pids
+echo "  orchestrator=$PORCH (custom agents: producer_a, producer_b, convergence_c, exploitation_d)"
 
-# SPAWN_ONLY=1 -> return immediately (start.sh's tmux wrapper drives the display).
-if [ "${SPAWN_ONLY:-0}" = "1" ]; then
-  echo "  (spawned; pids in workspace/_pids)  stop with: touch workspace/_stop; kill \$(cat workspace/_pids); pkill -f 'codex exec'"
+stop_all() {
+  touch "$STOP"
+  kill "$PORCH" ${PCAN:+"$PCAN"} 2>/dev/null || true
+  wait "$PORCH" ${PCAN:+"$PCAN"} 2>/dev/null || true
+}
+
+if [ "$SPAWN_ONLY" = "1" ]; then
+  echo "  spawned; stop with: touch workspace/_stop; kill \$(cat workspace/_pids)"
   exit 0
 fi
 
-echo "  python3 $S/convergence/scripts/queue.py --counts   # watch the queue"
+echo "  python3 $S/convergence/scripts/queue.py --counts"
 trap 'echo; echo "stopping..."; stop_all' INT TERM
-wait $P1 $P2 $PC $PD
-echo "== run ended (deadline/stop) -> workspace/report/report.md =="
+wait "$PORCH"
+if [ -n "$PCAN" ]; then
+  kill "$PCAN" 2>/dev/null || true
+  wait "$PCAN" 2>/dev/null || true
+fi
+python3 "$S/convergence/scripts/emit_poc.py" || true
+python3 "$S/convergence/scripts/triage.py" || true
+echo "== run ended (deadline/stop): workspace/report/report.md =="

@@ -3,9 +3,10 @@
 This document explains every component and every workflow in depth. For a quick start, see
 [README.md](README.md). Terms used throughout:
 
-- **Agent / session** — one autonomous `codex exec` process (the LLM doing the hunting).
-- **Producer** — a session that *creates* findings (Track A, Track B).
-- **Consumer** — the convergence session (C) that *validates/reproduces/reports*.
+- **Root orchestrator** — the one supervised `codex exec` process that owns child threads.
+- **Custom subagent** — a named A/B/C/D thread configured under `.codex/agents/`.
+- **Producer** — a subagent that *creates* findings (Track A, Track B).
+- **Consumer** — the convergence subagent (C) that *validates/reproduces/reports*.
 - **Finding** — one candidate vulnerability, stored as `workspace/findings/<id>.json`,
   conforming to `schemas/finding.schema.json`. This JSON contract is the spine of the system.
 - **Seed** — deterministic, no-LLM preprocessing that produces the Code Model and coverage map.
@@ -14,17 +15,17 @@ This document explains every component and every workflow in depth. For a quick 
 
 ## 1. Architecture in one paragraph
 
-TaintForge seeds a structural model of the target (ast+regex call graph + module split),
-then runs **four Codex sessions in parallel**. Two are producers — **A** hunts injection /
+TaintForge seeds a structural model of the target (ast+regex call graph + module split), then
+runs one root Codex orchestrator with **four custom subagents in parallel**. Two are producers — **A** hunts injection /
 data-flow bugs, **B** hunts logic / access-control bugs — and they stream findings into a
 shared, file-locked queue (`workspace/findings/`). **C** (convergence) continuously consumes
 that queue: it cross-validates each finding with an independent engine, reproduces it against
 a live instance, web-searches whether it is a known CVE or a novel 0-day, writes a runnable
 PoC, and ranks everything into a report. **D** (exploitation) takes only the critical findings
 C has already proved and weaponizes them — chaining, escalating, defeating sanitizers — with an
-honest record of any bounds. Each session is supervised at the shell level so it
-**auto-respawns** if it exits, keeping the pipeline alive for hours. The agent is always the
-analyst that authors findings; tools only provide leads and cross-checks.
+honest record of any bounds. The root continues returned child threads, and only the root process
+is supervised at the shell level so it **auto-respawns** if it exits. The role subagent is always
+the analyst that authors findings; tools only provide leads and cross-checks.
 
 ---
 
@@ -73,14 +74,13 @@ discovering #20. It also makes the **feedback loop** real — C can flip a findi
 `needs_reanalysis` and the producers, still alive, can revisit it. A batch pipeline couldn't
 do that without another full pass.
 
-### 1.5.3 How four processes stay in sync (the hard part)
+### 1.5.3 How four subagents stay in sync (the hard part)
 
-The four sessions are **separate OS processes** (separate `codex exec` invocations). They
-share no memory. So coordination has to go through something all four — and the supervising
-shell, and any human watching — can see and that *survives a respawn*. That something is the
-**filesystem** (`workspace/`). No database, no message broker, no socket: those add infra,
-and (for an in-memory queue) would die when a session ends. The filesystem is durable, zero
--setup, and inspectable with `ls`/`cat`.
+The four roles are separate Codex subagent threads under one root orchestrator. The root can relay
+short messages, but durable coordination still goes through something all four and any human can
+inspect and that survives a root respawn: the **filesystem** (`workspace/`). No database, message
+broker, or socket is needed. The filesystem is durable, zero-setup, and inspectable with
+`ls`/`cat`.
 
 **The queue *is* a directory.** `workspace/findings/` with one JSON file per finding. A file's
 *existence* means "queued"; its `status` field means "where in the lifecycle". Producers add
@@ -105,7 +105,7 @@ isn't an explicit update, the writer *keeps the original* and only appends a `hi
 ("re-seen") — it never clobbers another session's data. With `--update <id>` it *merges* new
 fields onto the existing object and preserves the full `history`. So the file accumulates
 truth from multiple sessions instead of the last writer winning blindly. The `history` array
-is the audit trail of who-touched-what-when across all four sessions.
+is the audit trail of who-touched-what-when across all four role threads.
 
 **`status` is the hand-off signal.** The lifecycle field is a tiny state machine living on
 disk, and it's how producer and consumer coordinate *without talking directly*:
@@ -120,15 +120,12 @@ risking drift — exactly the "findings exist but report says 0" bug), the dashb
 **re-derives them every cycle** from the source of truth. Source of truth = `findings/`;
 everything else is a pure function of it, recomputed.
 
-### 1.5.4 How the *lifecycles* stay in sync (supervisors + `_stop`)
+### 1.5.4 How the *lifecycles* stay in sync (orchestrator + supervisor + `_stop`)
 
-Sessions are finite and independent, so nothing inherently keeps all four *running together*
-for the duration. The coordination primitive is again the filesystem: each role runs in a
-shell `supervise()` loop that respawns the session on exit **until** either a deadline
-(`MAX_HOURS`) or the presence of `workspace/_stop`. `_stop` is a shared kill-switch every
-supervisor polls — `touch workspace/_stop` is how you stop *all* of them at once (and why you
-must create it *before* killing PIDs, or a supervisor respawns what you just killed). The
-supervisor PIDs are recorded in `workspace/_pids` as the stop handle.
+Subagent turns and root sessions are finite. The root keeps exactly four named threads active and
+sends follow-up tasks when a role returns early. A single shell `supervise_orchestrator()` loop
+respawns the root on exit until either `MAX_HOURS` or `workspace/_stop`. `_stop` is the shared
+kill-switch; `workspace/_pids` records the root-supervisor and optional canary PIDs.
 
 ### 1.5.5 How the design got here (refactors, and why each happened)
 
@@ -138,6 +135,7 @@ Each of these was a real failure that forced a boundary change:
 |---|---|---|
 | sequential pipeline | parallel streaming A/B/C + exploitation D | overlap breadth (find) with depth (reproduce/weaponize); enable live feedback |
 | shell loop re-invoking codex per module | one long self-driving session per role | the per-module loop reset the agent's memory every iteration |
+| four independent `codex exec` supervisors | one supervised root + four custom subagents | make role identity/configuration native and let the root coordinate threads directly |
 | tools author findings (semgrep→finding) | **agent** authors; tools only hint | semgrep-driven runs produced 0 findings (PHP not in rules); judgment was missing |
 | Semgrep OSS | OpenGrep | Semgrep OSS core can segfault on very large repos |
 | stateless `probe.py` (one request) | session-aware `--jar` cookie jar | auth'd reproduction (login → protected resource, IDOR replay) was impossible without persistent sessions |
@@ -587,7 +585,7 @@ authorized to test, never an arbitrary host.
 ## 7. The shared writer (`_shared/write_finding.py`)
 
 The single way findings are created/updated, used by A, B, C, and D. It is **file-locked**
-(`fcntl`) and **append-only**, so four concurrent sessions never corrupt the same file.
+(`fcntl`) and **append-only**, so four concurrent role threads never corrupt the same file.
 ```bash
 write_finding.py --file f.json                 # create from a finding JSON
 write_finding.py --update <id> --file patch.json   # merge an update (status, repro, disclosure...)
@@ -599,7 +597,7 @@ Updates merge into `history` for a full audit trail. It validates against the fi
 
 Where `write_finding.py` records vulnerabilities, `leads.py` records the raw material they're
 built from — the intermediate observations a one-pass scan would discard. Also file-locked, so
-parallel sessions append safely.
+parallel subagents append safely.
 ```bash
 echo '{"kind":"lead","where":{"file":"x.js","line":42,"symbol":"parseModel"},
        "observation":"walks value[path[i]] from user-split string, no hasOwnProperty",
@@ -630,36 +628,33 @@ Steps it performs:
 1. **Seed** (no LLM): `build_code_model.sh` → `CODE_MODEL.json`; `coverage.py --init` →
    `coverage.json`.
 2. If `--url`: copy accounts to `workspace/_accounts.json`, start `canary.py serve` in the
-   background, and build the live-target instructions (`DYN`).
-3. Build the four mission strings (A/B/C/D) and launch each under a **supervisor**:
+   background, and build the live-target context.
+3. Start one root Codex session under a **supervisor**. The root loads the project custom-agent
+   definitions from `.codex/agents/*.toml`, spawns A/B/C/D concurrently, and continues a child
+   with follow-up work if that role returns early:
    ```
-   supervise(){ ( while no _stop and now < DEADLINE; do
-                    $CODEX_CMD "$MISSION"; sleep 5;   # respawn on exit
+   supervise_orchestrator(){ ( while no _stop and now < DEADLINE; do
+                    $CODEX_CMD "$ORCHESTRATOR_PROMPT"; sleep 5
                  done ) </dev/null >/dev/null 2>&1 & echo $!; }
    ```
-   The fds are detached so backgrounded supervisors don't hold the parent shell open.
-4. Write supervisor pids to `workspace/_pids`.
+   `.codex/config.toml` caps the root at four concurrent child threads. The fds are detached so
+   the background supervisor does not hold the parent shell open.
+4. Write the root-supervisor and optional canary pids to `workspace/_pids`.
 5. `SPAWN_ONLY=1` → return immediately (used by `start.sh`); otherwise `wait` on the
-   supervisors.
+   supervisor.
 
 Env knobs: `CODEX_CMD` (default `codex exec --sandbox workspace-write`), `MAX_HOURS`
 (default 12), `CANARY_HOST`/`CANARY_PORT` (default `127.0.0.1:9111`), `SPAWN_ONLY`.
 
-**Why supervisors?** A `codex exec` session is finite — it ends when the agent thinks it's
-done or hits a token limit. For a streaming consumer that's fatal (C "completes" and dies
-while findings still arrive). The supervisor respawns it until the deadline or `_stop`.
+**Why keep one supervisor?** The root `codex exec` remains finite. If it exits, the shell rebuilds
+the orchestration layer; durable coverage/findings/leads let the new child threads resume. Role
+continuation during a healthy root session is handled natively with subagent follow-up tasks.
 
 ### 8.2 `start.sh` — the tmux wrapper
-Calls `SPAWN_ONLY=1 audit.sh` (fds detached so it returns immediately), then builds a tmux
-window with **panes whose labels are bound to pane ids** (so the `tiled` layout can't scramble
-them). The detached session is created large (`-x 250 -y 60+`) so panes aren't dropped by
-minimum-size limits. The 5-pane layout:
+Calls `SPAWN_ONLY=1 audit.sh`, then builds a two-pane tmux window:
 ```
-🅐 INJECT (A)   | 🅑 LOGIC (B)
-🅒 CONVERGE (C) | 🅓 EXPLOIT (D)
-📊 DASHBOARD
+ROOT + A/B/C/D ORCHESTRATION | DASHBOARD
 ```
-Panes are bound to pane ids (not indices) so the `tiled` layout can't scramble the labels.
 Detach: `Ctrl-b` then `d` (sessions keep running). Re-attach: `tmux attach -t taintforge`.
 
 ---
@@ -668,7 +663,7 @@ Detach: `Ctrl-b` then `d` (sessions keep running). Re-attach: `tmux attach -t ta
 
 ```
 1. SEED        build_code_model.sh + coverage.py --init      (deterministic, ~seconds–minutes)
-2. SPAWN       audit.sh launches A, B, C under supervisors; canary.py if --url
+2. SPAWN       audit.sh launches root; root spawns A/B/C/D custom subagents; canary.py if --url
 3. PRODUCE     A (sink→source taint) and B (entry→resource authz) stream findings
                  → write_finding.py → workspace/findings/<id>.json  [status: candidate]
                  + on parser/deserializer/dispatcher code: deep-dive, record leads/primitives
@@ -682,8 +677,8 @@ Detach: `Ctrl-b` then `d` (sessions keep running). Re-attach: `tmux attach -t ta
                  f. triage.py    → report/report.md (ranked, 0-day section)
                  g. leads.py open → realize candidate chains into one chained finding
 5. FEEDBACK    repro fails → needs_reanalysis → producers revisit
-6. RESPAWN     any session exits → supervisor restarts it (until MAX_HOURS / _stop)
-7. STOP        touch workspace/_stop; kill $(cat workspace/_pids); pkill -f 'codex exec'
+6. CONTINUE    returned child → root follow-up; exited root → supervisor respawn
+7. STOP        touch workspace/_stop; kill $(cat workspace/_pids)
 ```
 
 ### Example: IDOR confirmed end-to-end
@@ -724,29 +719,24 @@ normal users plus an admin**, e.g.:
 ]
 ```
 
-### Full run (live target, network + web search on)
+### Full run (live target)
 ```bash
-CODEX_CMD="codex exec --sandbox workspace-write \
-  --config sandbox_workspace_write.network_access=true \
-  --config web_search=live" \
-  ./start.sh -u http://localhost:8080 targets/<app>
+./start.sh -u http://localhost:8080 targets/<app>
 ```
-- `network_access=true` — without it live probes fail with `Operation not permitted`.
-- `web_search=live` — without it the known-vs-novel (0-day) step can't run.
+- C/D network access and C live web search are configured in their custom-agent TOMLs.
 - `MAX_HOURS=24 ...` — run longer.
 
 ### Watch / stop
 ```bash
 # dashboard pane shows it live; headless:
-tail -f workspace/_log_C.txt
+tail -f workspace/_log_orchestrator.txt
 python3 .agents/skills/convergence/scripts/queue.py --counts
 cat workspace/report/report.md
 ls workspace/report/*/        # per-vuln poc.py + finding.md
 
-# stop EVERYTHING (flag first or supervisors respawn):
+# stop EVERYTHING (flag first or the root supervisor respawns):
 touch workspace/_stop
 kill $(cat workspace/_pids) 2>/dev/null
-pkill -f "codex exec"; pkill -f "canary.py"; pkill -f "dashboard.py"
 tmux kill-session -t taintforge 2>/dev/null
 ```
 
@@ -757,13 +747,12 @@ tmux kill-session -t taintforge 2>/dev/null
 | symptom | cause | fix |
 |---|---|---|
 | `call_edges: 0` | extractor build failed | check python3 + re-seed; inspect _log for errors |
-| probe: `Operation not permitted` | sandbox network off | add `--config sandbox_workspace_write.network_access=true` |
-| disclosure never set | web search off | add `--config web_search=live` |
+| probe: `Operation not permitted` | C/D custom-agent network config not loaded | trust the repo and verify `.codex/agents/{convergence_c,exploitation_d}.toml` |
+| disclosure never set | C custom-agent web search config not loaded | verify `.codex/agents/convergence_c.toml` and Codex config diagnostics |
 | IDOR stuck at candidate | only 1 account (no victim to compare) | add ≥2 normal users to `accounts.json` |
-| C "completes" and stops | a `codex exec` session is finite | supervisors respawn it; ensure latest `audit.sh` |
+| C returns while producers run | a child turn is finite | root sends follow-up work; inspect `_log_orchestrator.txt` |
 | stuck at `launching...`, no tmux | backgrounded supervisors held the shell's fds | latest `audit.sh`/`start.sh` detach fds (`</dev/null >…`) |
-| tmux shows 3 panes, no C | detached session too small | latest `start.sh` creates it `-x 250 -y 60` |
-| pane labels don't match contents | `tiled` renumbered panes | latest `start.sh` binds labels to pane ids |
+| tmux shows no per-role pane | expected in subagent mode | use the combined orchestrator pane; child threads are owned by the root |
 | report shows 0 while findings exist | stale `report.md` | dashboard regenerates it each cycle; or run `triage.py` |
 | killed codex keeps coming back | `_stop` not set | `touch workspace/_stop` **before** killing |
 | `failed to load skill … YAML frontmatter` | bad SKILL.md frontmatter | `python3 fix_skills.py` |
@@ -781,11 +770,11 @@ tmux kill-session -t taintforge 2>/dev/null
 - **Sink-first, flow-aware.** Anchor on the finite sink set, reason backward across files via
   the call graph. Track B mirrors this for entry→resource paths.
 - **Streaming, parallel, self-driving, supervised.** A and B produce concurrently; C consumes
-  live; each is one long autonomous session, respawned by a shell supervisor so the pipeline
-  survives finite sessions.
+  live; the root keeps four custom subagents active and one shell supervisor rebuilds the root
+  when necessary.
 - **Exhaustive.** Every module, every sink/route: find a bug or justify why it's safe.
 - **Reproduction is the strongest evidence.** A finding becomes `confirmed` only when fired
   against a live instance; failures feed back as `needs_reanalysis`.
 - **Novelty matters.** Reproduced bugs are checked against public CVEs so true 0-days surface.
 - **Append-only, file-locked findings** with stable ids and `history` — safe for concurrent
-  sessions and fully auditable.
+  role threads and fully auditable.

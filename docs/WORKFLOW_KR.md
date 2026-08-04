@@ -1,6 +1,6 @@
 # TaintForge 워크플로우 정리
 
-AI 에이전트(Codex) 기반 보안 분석 파이프라인의 전체 흐름을 정리함. 핵심 원칙은 **에이전트가 취약점을 찾고, 툴은 단서·교차검증만 제공함**. 모든 취약점(finding)은 에이전트가 직접 작성함. A/B/C/D 4세션이 병렬로 돎.
+AI 에이전트(Codex) 기반 보안 분석 파이프라인의 전체 흐름을 정리함. 핵심 원칙은 **에이전트가 취약점을 찾고, 툴은 단서·교차검증만 제공함**. 모든 취약점(finding)은 에이전트가 직접 작성함. 루트 오케스트레이터가 A/B/C/D custom subagent 네 개를 병렬로 관리함.
 
 ---
 
@@ -15,7 +15,7 @@ AI 에이전트(Codex) 기반 보안 분석 파이프라인의 전체 흐름을 
    │
    ├──────────────┬──────────────┐
    ▼              ▼              ▼
-[A 생산자]   [B 생산자]   [C 소비자]   [D 익스플로잇]   ← 4개 Codex 세션 병렬
+[A 생산자]   [B 생산자]   [C 소비자]   [D 익스플로잇]   ← 4개 custom subagent 병렬
  인젝션          로직/접근제어    수렴(검증·재현)   크리티컬 무기화
  sink→역추적     entry→자원      계속 돌면서 소비   (C가 증명한 것만)
    │              │              ▲              ▲
@@ -204,23 +204,24 @@ confirmed          재현 + 완전 정리 (가장 강함)
 
 ---
 
-## 6. 동기화 — 4개 프로세스가 어떻게 안 부딪히나
+## 6. 동기화 — 4개 subagent가 어떻게 안 부딪히나
 
-네 세션은 별도 OS 프로세스라 공유 메모리가 없음. 조율은 전부 **파일시스템(`workspace/`)**으로 함. DB·브로커 안 쓰는 이유: 인프라 부담 + 세션 죽으면 날아감. 파일은 영속적이고 `ls`로 들여다볼 수 있음.
+네 subagent thread의 장기 상태 조율은 전부 **파일시스템(`workspace/`)**으로 함. DB·브로커 안 쓰는 이유: 인프라 부담 + 세션이 재구성되면 휘발성 문맥은 사라짐. 파일은 영속적이고 `ls`로 들여다볼 수 있음.
 
 - **큐 = 디렉터리** — `workspace/findings/`에 finding 하나당 파일 하나. 파일 존재 = 큐에 있음, `status` = 진행 단계.
 - **중복 제거 = 내용 기반 ID** — `id = 해시(track|취약점클래스|sink파일|sink라인)`. 같은 버그를 두 번 찾으면 같은 ID → 같은 파일로 합쳐짐(멱등). 그래서 A·B가 겹쳐도 중복 안 됨.
-- **동시성 안전 = 파일락** — finding 쓰기 전에 `fcntl` 배타적 락. 세 프로세스가 같은 파일 써도 직렬화돼서 안 깨짐. append-only라 남의 데이터 안 덮음.
+- **동시성 안전 = 파일락** — finding 쓰기 전에 `fcntl` 배타적 락. 여러 subagent가 같은 파일을 써도 직렬화돼서 안 깨짐. append-only라 남의 데이터 안 덮음.
 - **파생물은 매번 재생성** — `report.md`와 개별 보고서는 `findings/`에서 파생됨. 점진적으로 동기화하다 어긋나는 대신, 대시보드가 매 사이클 통째로 다시 만듦. 진실의 원천은 항상 `findings/`.
 
 ---
 
-## 7. 세션 생명주기 — supervisor
+## 7. 세션 생명주기 — root orchestrator + supervisor
 
-`codex exec` 세션은 **유한함**(에이전트가 끝났다고 판단하거나 토큰 한도에 닿으면 종료). 스트리밍 소비자(C)에겐 치명적임 — 빈 큐를 보고 "완료"로 착각하고 죽으면, 늦게 도착하는 finding을 아무도 재현 안 함.
+custom subagent turn과 루트 `codex exec` 세션은 **유한함**. 스트리밍 소비자(C)에겐 치명적임 — 빈 큐를 보고 "완료"로 착각하고 끝나면, 늦게 도착하는 finding을 아무도 재현 안 함.
 
-그래서 각 역할을 **셸 supervisor 루프**로 감쌈:
-- 세션이 죽으면 5초 뒤 **자동 재시작**(respawn)
+그래서 루트 오케스트레이터가 네 역할 thread를 유지하고, 셸은 루트 하나만 **supervisor 루프**로 감쌈:
+- 역할이 반환되면 같은 thread에 follow-up을 보내 계속 진행
+- 루트 세션이 죽으면 5초 뒤 **자동 재시작**(respawn)
 - `MAX_HOURS`(기본 12시간) 또는 `workspace/_stop` 파일이 생길 때까지 계속
 - 정지: `touch workspace/_stop`을 **먼저** 한 뒤 프로세스 kill (안 그러면 supervisor가 되살림)
 
@@ -230,13 +231,13 @@ confirmed          재현 + 완전 정리 (가장 강함)
 
 ```
 1. SEED      build_code_model + coverage --init          (결정론적, 한 번)
-2. SPAWN     audit.sh가 A·B·C를 supervisor로 띄움; -u면 canary.py도
+2. SPAWN     audit.sh가 root를 띄우고 root가 A·B·C·D custom subagent를 생성; -u면 canary.py도
 3. PRODUCE   A(sink 역추적)·B(entry→자원)가 finding 스트림 생성   [candidate]
 4. CONVERGE  C가 계속 루프:
                교차검증 → 재현(probe/canary/browser_probe)
                → 공개여부 검색 → poc.py 작성 → 보고서 생성
 5. FEEDBACK  재현 실패 → needs_reanalysis → 생산자가 다시 봄
-6. RESPAWN   세션 죽으면 supervisor가 재시작 (MAX_HOURS / _stop까지)
+6. RESPAWN   역할 반환은 root가 follow-up, root 종료는 supervisor가 재시작
 7. STOP      touch workspace/_stop; kill; pkill
 ```
 
@@ -249,4 +250,4 @@ confirmed          재현 + 완전 정리 (가장 강함)
 
 ## 핵심 한 줄 요약
 
-> **결정론적인 것은 툴로 한 번만, 판단은 집중된 에이전트로, 독립 프로세스는 영속적인 파일로만 조율함. 모든 취약점은 가설로 시작해 실제 재현으로 증명함.**
+> **결정론적인 것은 툴로 한 번만, 판단은 집중된 subagent로, 장기 상태는 영속적인 파일로 조율함. 모든 취약점은 가설로 시작해 실제 재현으로 증명함.**

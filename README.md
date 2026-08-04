@@ -1,7 +1,7 @@
 # TaintForge
 
-**An AI-agent white-box security assessment pipeline.** TaintForge points autonomous
-Codex sessions at a codebase and lets them hunt vulnerabilities the way a human auditor
+**An AI-agent white-box security assessment pipeline.** TaintForge points specialized Codex
+subagents at a codebase and lets them hunt vulnerabilities the way a human auditor
 would — reading code, reasoning about data flow and access control, then proving findings
 against a live instance.
 
@@ -50,9 +50,9 @@ workflow-by-workflow walkthrough, see **[DOCS.md](DOCS.md)**.
 
 ## How it works
 
-TaintForge runs as **four parallel autonomous Codex sessions** that share the findings
-queue (`workspace/findings/`) — a streaming producer-consumer (watch them live in the
-`start.sh` tmux dashboard):
+TaintForge runs one supervised **root Codex orchestrator** which owns four project-scoped
+custom subagents. The subagents share `workspace/findings/` as a streaming producer-consumer
+queue (watch the combined orchestration stream and queue state in the `start.sh` dashboard):
 
 - **A — producer (injection / data-flow):** SQLi, command/code injection, XSS, SSRF, path
   traversal, file inclusion, deserialization, XXE, SSTI, NoSQL, open redirect. Enumerates
@@ -70,15 +70,13 @@ queue (`workspace/findings/`) — a streaming producer-consumer (watch them live
   defeating sanitizers/quoting — recording the result (and an honest statement of any
   bounds) in the finding's `exploit` object plus a standalone `exploit.py`.
 
-Each session is **one long, self-driving session** — it reads code, finds, records, and
-digs deeper on its own. The shell never re-invokes an agent per module (which would reset
-its memory). But a `codex exec` session is finite — it ends when the agent decides it's
-done or hits a token limit — so each role runs under a **shell supervisor that respawns it**
-on exit until a deadline (`MAX_HOURS`, default 12h) or a `workspace/_stop` flag. That's what
-keeps C and D alive to consume findings that arrive late. `write_finding.py` is file-locked,
-so the four sessions never corrupt the same finding. A and B produce concurrently; C consumes
-as findings appear; D weaponizes the critical ones C proves; failed reproductions route back
-as `needs_reanalysis` (feedback loop).
+The stable role definitions live in `.codex/agents/*.toml`; `.codex/config.toml` enables four
+concurrent child threads. The root orchestrator spawns A/B/C/D together, waits for them, and
+continues a role with a follow-up task if it returns early. Because the root `codex exec` is
+still finite, one shell supervisor respawns only the root until `MAX_HOURS` (default 12h) or
+`workspace/_stop`. Durable state in `workspace/` lets rebuilt threads continue without losing
+coverage, leads, or findings. `write_finding.py` remains file-locked, so concurrent subagents do
+not corrupt the queue.
 
 Status lifecycle of a finding:
 ```
@@ -110,8 +108,10 @@ not discarded, because it may be the missing piece another session needs.
 
 ```
 taintforge/                         ← repo root (run from here)
-  start.sh                          ← tmux launcher: 5-pane live view (A|B / C|D / dashboard)
-  audit.sh                          ← engine: seeds the model + spawns the parallel sessions
+  start.sh                          ← tmux launcher: orchestrator stream + dashboard
+  audit.sh                          ← seed + supervised root orchestrator
+  .codex/config.toml                ← enables/caps project subagent concurrency
+  .codex/agents/*.toml              ← A/B/C/D custom-agent role definitions
   accounts.json[.example]           ← test accounts for dynamic auth/IDOR testing
   fix_skills.py                     ← repairs SKILL.md YAML frontmatter if Codex can't load
   AGENTS.md                         ← operating contract Codex reads first
@@ -142,9 +142,9 @@ taintforge/                         ← repo root (run from here)
     report/<id>/finding.md          ← per-vuln individual report
     _accounts.json                  ← copied test accounts (live auth/IDOR)
     _canary.log                     ← SSRF out-of-band callback hits
-    _pids                           ← supervisor pids (stop handle)
-    _stop                           ← touch this to stop all supervisors
-    _log_{A,B,C,D}.txt              ← per-session logs (appended across respawns)
+    _pids                           ← root-supervisor/canary pids (stop handle)
+    _stop                           ← touch this to stop root and all child threads
+    _log_orchestrator.txt           ← combined root/subagent orchestration stream
 ```
 
 ## The Code Model
@@ -244,21 +244,20 @@ If Codex logs `failed to load skill ... YAML frontmatter`, run `python3 fix_skil
 ./start.sh targets/<app>                              # static only, with dashboard
 ```
 
-`start.sh` opens a **tmux live view** — whitebox: 🅐 inject | 🅑 logic / 🅒 converge | 🅓 exploit
-and a dashboard pane (coverage bar, findings by status/class, novel + 💥 exploit counters,
-latest hits, elapsed time). Detach with `Ctrl-b` then `d` (sessions keep running); re-attach
-with `tmux attach -t taintforge`.
-Stop everything (the `_stop` flag must come first, or supervisors respawn):
-`touch workspace/_stop; kill $(cat workspace/_pids); pkill -f 'codex exec'; tmux kill-session -t taintforge`.
+`start.sh` opens a **tmux live view** with the combined A/B/C/D orchestration stream and a
+dashboard pane (coverage bar, findings by status/class, novel + 💥 exploit counters, latest
+hits, elapsed time). Detach with `Ctrl-b` then `d`; re-attach with
+`tmux attach -t taintforge`. Stop everything with
+`touch workspace/_stop; kill $(cat workspace/_pids); tmux kill-session -t taintforge`.
 If tmux isn't installed, `start.sh` falls back to a plain headless run.
 
-Headless / no-tmux (logs go to `workspace/_log_{A,B,C}.txt`):
+Headless / no-tmux (logs go to `workspace/_log_orchestrator.txt`):
 ```bash
 ./audit.sh -u http://localhost:8080 targets/<app>
 ./audit.sh --url http://host --accounts creds.json targets/<app>
 ```
 
-Pass `-u/--url` when the target is **running** somewhere — the C session (and producers)
+Pass `-u/--url` when the target is **running** somewhere — the C subagent (and producers)
 then send real requests to confirm findings dynamically. Test accounts go in
 `accounts.json` at the repo root (or `--accounts <file>`): a JSON array of
 `{username, password}` (see `accounts.json.example`). Codex works out the login/session
@@ -268,19 +267,13 @@ rather than guessed. Accounts are copied to `workspace/_accounts.json`; requests
 go to the URL you pass.
 
 Runs with `--sandbox workspace-write` (writes `workspace/`, `targets/` stays read-only).
-Four concurrent sessions ≈ 4× tokens. Dynamic reproduction, exploitation, and disclosure
-search need the sandbox's **network** and **web search** enabled, so use a `CODEX_CMD` like:
-```bash
-CODEX_CMD="codex exec --sandbox workspace-write \
-  --config sandbox_workspace_write.network_access=true \
-  --config web_search=live" \
-  ./start.sh -u http://localhost:8080 targets/<app>
-```
-Without `network_access` the live probes fail with `Operation not permitted`; without
-`web_search` the known-vs-novel (0-day) classification can't run.
+Four child threads plus the lightweight root orchestrator consume more tokens than a single
+agent. Network and live web search are enabled only in the C/D agent TOMLs; A/B remain scoped to
+repository and workspace analysis.
 
-Sessions auto-respawn until `MAX_HOURS` (default 12) or `workspace/_stop`. To run longer,
-raise `MAX_HOURS=24`. State in `workspace/` persists across runs, so agents dig deeper.
+The root orchestrator auto-respawns until `MAX_HOURS` (default 12) or `workspace/_stop`; it
+continues returned role threads while alive. To run longer, raise `MAX_HOURS=24`. State in
+`workspace/` persists across runs, so replacement threads resume instead of starting over.
 
 ### Android APK mode
 
@@ -302,7 +295,7 @@ toolchain, evidence grading, and emulator-only safety boundary.
 With `start.sh` the dashboard pane shows this live. Headless? In a separate shell:
 
 ```bash
-tail -f workspace/_log_B.txt                                   # a session's reasoning
+tail -f workspace/_log_orchestrator.txt                        # root + child activity
 python3 .agents/skills/convergence/scripts/queue.py --counts   # queue by status
 python3 .agents/skills/source-model/scripts/coverage.py --summary
 ls workspace/findings | wc -l
@@ -373,10 +366,10 @@ to test — it never targets a host it wasn't pointed at.
 - **Sink-first, flow-aware.** Anchor on the finite sink set and reason backward across
   files using the call graph — a sink safe in its own file is often fed tainted input
   several calls away. Track B mirrors this for entry-point -> resource access paths.
-- **Streaming, parallel, self-driving.** A and B produce concurrently; C consumes live;
-  each is one long autonomous session, not a shell loop re-spawning a memory-less agent.
+- **Streaming, parallel, self-driving.** A and B produce concurrently; C consumes live; the
+  root orchestrator keeps all four specialized subagent threads moving.
 - **Exhaustive.** Every module, every sink/route: find a bug or justify why it's safe.
 - **Reproduction is the strongest evidence.** A finding becomes `confirmed` only when fired
   against a live instance; failures feed back for re-analysis.
-- **Append-only, file-locked findings** with stable ids and `history` — safe for the three
-  concurrent sessions and fully auditable.
+- **Append-only, file-locked findings** with stable ids and `history` — safe for four
+  concurrent role threads and fully auditable.

@@ -1,12 +1,12 @@
 # AGENTS.md — TaintForge (AI-agent security assessment, white-box + black-box)
 
-You are one of several Codex sessions run in parallel by `audit.sh`. Read this first, then
-your role's skill under `.agents/skills/`. **You are the analyst — you author findings.**
+You are a named custom subagent spawned by TaintForge's root Codex orchestrator. Read this first,
+then your role's skill under `.agents/skills/`. **You are the analyst — you author findings.**
 Tools (the ast+regex extractor, OpenGrep/CodeQL, probe.py, canary.py, browser_probe.py,
 active_probe.py) only give leads and cross-checks; a tool hit is a place to look, never a
 finding by itself.
 
-There are two modes. **Whitebox (default)** runs four roles sharing one streaming queue,
+There are two modes. **Whitebox (default)** runs four custom subagent roles sharing one streaming queue,
 `workspace/findings/`:
 
 - **A — producer, injection / data-flow.** Skill: `vuln-track-a`.
@@ -37,8 +37,10 @@ Everything is glued by one contract: `schemas/finding.schema.json`.
 ```
 TaintForge/                        <- repo root (cwd)
   AGENTS.md                        <- you are here
-  audit.sh                         <- engine: seeds + spawns A/B/C/D
-  start.sh                         <- tmux wrapper: 5-pane live view (A/B/C/D + dashboard)
+  audit.sh                         <- seed + supervised root orchestrator
+  start.sh                         <- tmux wrapper: orchestrator log + dashboard
+  .codex/config.toml               <- project multi-agent concurrency settings
+  .codex/agents/*.toml             <- A/B/C/D custom-agent definitions
   accounts.json                    <- live test accounts (>=2 normal users + admin for IDOR)
   schemas/{finding,code_model}.schema.json
   .agents/skills/
@@ -59,8 +61,8 @@ TaintForge/                        <- repo root (cwd)
     findings/<id>.json             <- the shared queue
     report/report.md               <- ranked index (incl. potential 0-day + weaponized sections)
     report/<id>/{poc.py,finding.md,exploit.py} <- per-vuln PoC + report (+ exploit for D)
-    _log_{A,B,C,D}.txt
-    _stop                          <- if this file exists, supervisors stop respawning
+    _log_orchestrator.txt          <- root + subagent orchestration stream
+    _stop                          <- stops the supervised orchestrator and its children
 ```
 
 > Codex discovers skills under `.agents/skills/`. `workspace/` is your memory - use it as a
@@ -70,13 +72,13 @@ TaintForge/                        <- repo root (cwd)
 > drive the sweep, starting from modules that expose routes and tracing inward from each.
 > Cover EVERY module - for each, record a finding or justify why it's safe.
 
-## You are one long session, and you may be respawned
+## You are a persistent subagent thread, and the orchestrator may continue you
 
-A `codex exec` session is finite (it ends when you decide you're done or hit a token limit).
-`audit.sh` runs each role under a **shell supervisor that respawns it** until `MAX_HOURS` or
-`workspace/_stop`. So: never treat "queue momentarily empty" as completion, and (especially
-for C) **do not stop on your own** - when there's nothing new, wait briefly and re-check.
-Lean on `workspace/` so a respawn continues where the last session left off.
+A subagent turn is finite. The root orchestrator keeps the four named role threads active and
+sends follow-up work when a role returns early; `audit.sh` supervises and respawns only that root
+orchestrator until `MAX_HOURS` or `workspace/_stop`. Never treat "queue momentarily empty" as
+completion, especially for C and D. Lean on `workspace/` so a continued or rebuilt thread resumes
+from durable state instead of repeating work.
 
 ## The Code Model (seeded once, before you start)
 
