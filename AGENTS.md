@@ -1,12 +1,13 @@
 # AGENTS.md — TaintForge (AI-agent security assessment, white-box + black-box)
 
-You are a named custom subagent spawned by TaintForge's root Codex orchestrator. Read this first,
+You are one named role running as an independent supervised Codex session. Read this first,
 then your role's skill under `.agents/skills/`. **You are the analyst — you author findings.**
 Tools (the ast+regex extractor, OpenGrep/CodeQL, probe.py, canary.py, browser_probe.py,
 active_probe.py) only give leads and cross-checks; a tool hit is a place to look, never a
 finding by itself.
 
-There are two modes. **Whitebox (default)** runs four custom subagent roles sharing one streaming queue,
+There are two modes. **Whitebox (default)** runs five core roles, with optional DBMS fuzzer F,
+sharing one streaming queue,
 `workspace/findings/`:
 
 - **A — producer, injection / data-flow.** Skill: `vuln-track-a`.
@@ -15,6 +16,15 @@ There are two modes. **Whitebox (default)** runs four custom subagent roles shar
 - **D — exploitation.** Skill: `convergence`. Takes only the critical findings C already
   proved (reproduced/confirmed) and weaponizes them — chaining, escalating impact, defeating
   sanitizers — recording results in the finding's `exploit` object with **honest bounds**.
+- **E — reanalysis.** Skill: `convergence`, plus the producer skill matching the finding track.
+  Owns `needs_reanalysis`, diagnoses the failed premise or missing evidence, and returns only
+  evidence-backed items to C for retriage.
+- **F — DBMS fuzzing (optional).** Skill: `dbms-fuzzing`. Runs structured wire/SQL, sanitizer,
+  coverage-guided, minimization, and stock-replay lanes for authorized local Redis, MySQL,
+  MariaDB, PostgreSQL, and Oracle targets. Enable with `TF_DBMS_FUZZ=1`.
+
+The primary objective is demonstrable **pre-authentication RCE**, followed by **authenticated
+RCE**. Lower-impact findings matter mainly when they provide a credible link in an RCE chain.
 
 Everything is glued by one contract: `schemas/finding.schema.json`.
 
@@ -27,7 +37,8 @@ Everything is glued by one contract: `schemas/finding.schema.json`.
   file-locked and append-only, safe for concurrent sessions. Never hand-edit a finding file
   or overwrite another finding.
 - Dynamic reproduction, probing, and exploitation hit **only** the live target URL you were
-  given and the local SSRF canary — never any other host. Agent D weaponizes findings
+  given, the local SSRF canary, and for enabled F campaigns the loopback DBMS endpoints in
+  `harnesses/dbms_fuzz/targets.json` — never any other host. Agent D weaponizes findings
   for assets you own or are authorized to test; it never targets a host it wasn't pointed at.
 - Findings must validate against `schemas/finding.schema.json`; CODE_MODEL against
   `schemas/code_model.schema.json`.
@@ -37,10 +48,10 @@ Everything is glued by one contract: `schemas/finding.schema.json`.
 ```
 TaintForge/                        <- repo root (cwd)
   AGENTS.md                        <- you are here
-  audit.sh                         <- seed + supervised root orchestrator
-  start.sh                         <- tmux wrapper: orchestrator log + dashboard
+  audit.sh                         <- seed + five core sessions + optional F
+  start.sh                         <- tmux wrapper: A/B/C/D/E[/F] logs + dashboard
   .codex/config.toml               <- project multi-agent concurrency settings
-  .codex/agents/*.toml             <- A/B/C/D custom-agent definitions
+  .codex/agents/*.toml             <- A/B/C/D/E/F role definitions
   accounts.json                    <- live test accounts (>=2 normal users + admin for IDOR)
   schemas/{finding,code_model}.schema.json
   .agents/skills/
@@ -52,6 +63,8 @@ TaintForge/                        <- repo root (cwd)
     vuln-track-b/                  <- logic/access-control finder; build_authz_matrix.py
     convergence/                   <- cross_validate.sh, correlate.py, probe.py, canary.py,
                                       browser_probe.py, triage.py, emit_poc.py, queue.py, dashboard.py
+    dbms-fuzzing/                  <- adaptive local DBMS fuzzing contract
+  harnesses/dbms_fuzz/             <- shared DBMS wire/SQL fuzz runner and build helper
   targets/<app>                    <- code under assessment (read-only)
   workspace/                       <- your persistent memory (notebook across respawns)
     CODE_MODEL.json, coverage.json (whitebox)
@@ -61,8 +74,8 @@ TaintForge/                        <- repo root (cwd)
     findings/<id>.json             <- the shared queue
     report/report.md               <- ranked index (incl. potential 0-day + weaponized sections)
     report/<id>/{poc.py,finding.md,exploit.py} <- per-vuln PoC + report (+ exploit for D)
-    _log_orchestrator.txt          <- root + subagent orchestration stream
-    _stop                          <- stops the supervised orchestrator and its children
+    _log_{A,B,C,D,E,F}.txt         <- independent live role streams (F optional)
+    _stop                          <- stops all core and optional supervised sessions
 ```
 
 > Codex discovers skills under `.agents/skills/`. `workspace/` is your memory - use it as a
@@ -72,13 +85,12 @@ TaintForge/                        <- repo root (cwd)
 > drive the sweep, starting from modules that expose routes and tracing inward from each.
 > Cover EVERY module - for each, record a finding or justify why it's safe.
 
-## You are a persistent subagent thread, and the orchestrator may continue you
+## You are a persistent supervised role session
 
-A subagent turn is finite. The root orchestrator keeps the four named role threads active and
-sends follow-up work when a role returns early; `audit.sh` supervises and respawns only that root
-orchestrator until `MAX_HOURS` or `workspace/_stop`. Never treat "queue momentarily empty" as
-completion, especially for C and D. Lean on `workspace/` so a continued or rebuilt thread resumes
-from durable state instead of repeating work.
+A Codex turn is finite. `audit.sh` runs A/B/C/D/E, plus optional F, as independent processes and
+respawns each role when it returns early, until `MAX_HOURS` or `workspace/_stop`. Never treat
+"queue momentarily empty" as completion, especially for C, D, E, and F. Lean on `workspace/` so a respawn resumes from
+durable state instead of repeating work.
 
 ## The Code Model (seeded once, before you start)
 
@@ -100,7 +112,7 @@ modules first), `--summary` reports entry-point-surface progress separately.
 
 ## Role contracts
 
-Whitebox roles (default — A/B produce, C converges, D weaponizes):
+Whitebox roles (default — A/B produce, C converges, D weaponizes, E resolves feedback, F fuzzes DBMS targets when enabled):
 
 | Role | Reads | Method | Writes |
 |---|---|---|---|
@@ -108,6 +120,8 @@ Whitebox roles (default — A/B produce, C converges, D weaponizes):
 | B (vuln-track-b) | CODE_MODEL `.comprehension` + `_authz_matrix.json` | trace **entry -> resource**; is there an authn/role/**ownership** gate anywhere on the path? a `findById` reachable with no ownership check = IDOR | `findings/*.json` track=B, status=candidate |
 | C (convergence) | `findings/*.json` (continuously) | cross-validate -> reproduce -> disclosure -> PoC -> triage | updates findings; `report/report.md`; `report/<id>/{poc.py,finding.md}` |
 | D (exploitation) | `findings/*.json` status reproduced/confirmed, critical classes only | chain & escalate the proven primitive to max impact; defeat sanitizers/quoting; verify each step | updates findings' `exploit` object (honest `constraints`); `report/<id>/exploit.py` |
+| E (reanalysis) | `findings/*.json` status needs_reanalysis + C's reproduction observation | diagnose the missing premise, revisit source and live evidence, then resolve or return with genuinely new evidence | updates via `write_finding.py`; status candidate/cross_validated/reproduced/false_positive |
+| F (DBMS fuzzing, optional) | configured local DBMS sources/endpoints + corpus/crash state | structured wire/SQL mutation, semantic repair, sanitizer/coverage feedback, minimization, exact-stock replay | `workspace/db-fuzz/`; track-A candidates via `write_finding.py` only after the promotion threshold |
 
 ## Convergence (C) loop - per finding
 
@@ -141,11 +155,12 @@ Whitebox roles (default — A/B produce, C converges, D weaponizes):
 candidate --cross-val--> cross_validated --repro--> reproduced --> confirmed
                                               |
                                   repro fails +--> false_positive   (discarded from ranking)
-                                              +--> needs_reanalysis  (feedback -> producers re-pick)
+                                              +--> needs_reanalysis  (feedback -> E investigates)
 ```
 
 - Convergence consumes `findings/` **continuously** - it never waits for producers to finish.
-- `needs_reanalysis` is the feedback loop: C flips the flag, A/B revisit with the reason.
+- `needs_reanalysis` is the feedback loop: C flips the flag, E exclusively diagnoses it and
+  returns it only with new evidence or closes it as false positive.
 - Severity from the producer is provisional; **reproduction outcome dominates** final ranking.
 - Every finding carries a `correlation_id` so multiple paths to one root cause de-dup.
 

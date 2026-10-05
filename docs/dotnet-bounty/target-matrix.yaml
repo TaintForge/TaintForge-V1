@@ -1,0 +1,68 @@
+snapshot: "2026-09-28"
+objective:
+  primary: pre-authentication RCE
+  secondary: authenticated RCE
+  retain_as_chain_primitives:
+    - request-boundary confusion
+    - authentication or authorization bypass
+    - cross-request data corruption
+    - arbitrary file write or code load
+
+scope:
+  primary_release: "10.0.12"
+  supported_releases:
+    - version: "10.0.12"
+      channel: LTS
+      phase: active
+      end_of_support: "2028-11-14"
+    - version: "9.0.20"
+      channel: STS
+      phase: maintenance
+      end_of_support: "2026-11-10"
+    - version: "8.0.31"
+      channel: LTS
+      phase: maintenance
+      end_of_support: "2026-11-10"
+    - version: "11.0.0-rc.1.26425.128"
+      channel: RC
+      phase: go-live
+      end_of_support: "2026-10-13"
+
+targets:
+  - id: dotnet-runtime-10.0.12
+    repository: https://github.com/dotnet/runtime.git
+    local_path: targets/dotnet-runtime-10.0.12
+    tag: v10.0.12
+    commit: 4271d88e0aebf3d04f188f1334c2220d80555ef6
+    priority: P0
+    lanes:
+      - official-managed-fuzz-baseline
+      - parser-coverage-gaps
+      - coreclr-asan
+      - metadata-loader-native-boundaries
+  - id: dotnet-aspnetcore-10.0.12
+    repository: https://github.com/dotnet/aspnetcore.git
+    local_path: targets/dotnet-aspnetcore-10.0.12
+    tag: v10.0.12
+    commit: cb21a42eafcd44cc35fad48d99dc82ff7512ce2f
+    priority: P0
+    lanes:
+      - kestrel-http1-inprocess
+      - kestrel-http1-socket-differential
+      - kestrel-http2-stateful
+      - kestrel-http3-stateful
+      - pooled-buffer-lifetime
+
+promotion:
+  required:
+    - reproduces_on_stock_supported_release
+    - attacker_controlled_input_is_demonstrated
+    - sanitizer_or_invariant_evidence_is_decisive
+    - impact_is_critical_or_important
+  reject:
+    - known_or_public_issue
+    - nightly_only
+    - unsupported_release_only
+    - generic_iis_openssl_or_platform_issue
+    - application_misconfiguration_only
+    - denial_of_service_without_qualifying_impact

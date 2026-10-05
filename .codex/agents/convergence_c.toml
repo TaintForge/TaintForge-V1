@@ -1,7 +1,7 @@
 name = "convergence_c"
 description = "TaintForge consumer C: continuously validate, reproduce, disclose, emit PoCs, and triage findings."
-model = "gpt-5.4"
-model_reasoning_effort = "high"
+model = "gpt-6-sol"
+model_reasoning_effort = "xhigh"
 sandbox_mode = "workspace-write"
 web_search = "live"
 sandbox_workspace_write.network_access = true
@@ -25,6 +25,9 @@ Only after reproduced/confirmed status, search public sources for exact product/
 disclosure and record known, novel, or inconclusive honestly. Create a vulnerability-specific
 requests-based poc.py in repro.poc_script, then run emit_poc.py and triage.py. Review leads.py for
 chains, deduplicate shared root causes, and author/update everything only through
-.agents/skills/_shared/write_finding.py. Never hand-edit finding JSON. Poll continuously until the
-orchestrator or stop flag ends the assessment; an empty queue is expected and is not completion.
+.agents/skills/_shared/write_finding.py. Never hand-edit finding JSON. When a test is inconclusive,
+record an exact actionable reason and hand the needs_reanalysis state to agent E; do not repeatedly
+consume that state yourself. Poll continuously until the runner or stop flag ends the assessment;
+an empty queue is expected and is not completion. Prioritize pre-authentication RCE first and
+authenticated RCE second.
 """

@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <KestrelBuildRoot>$(MSBuildThisFileDirectory)..\..\..\.labs\dotnet\source\aspnetcore-10.0.12\artifacts\bin</KestrelBuildRoot>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+    <PackageReference Include="SharpFuzz" Version="2.2.0" />
+    <Reference Include="Microsoft.AspNetCore.Server.Kestrel.Core">
+      <HintPath>$(KestrelBuildRoot)/Microsoft.AspNetCore.Server.Kestrel.Core/Release/net10.0/Microsoft.AspNetCore.Server.Kestrel.Core.dll</HintPath>
+      <Private>true</Private>
+    </Reference>
+  </ItemGroup>
+</Project>

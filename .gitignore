@@ -3,6 +3,8 @@ targets/
 
 workspace/
 
+.labs/
+
 .workspace-backup/
 
 __pycache__/
@@ -23,3 +25,27 @@ asdf-workspace/
 .codex-security/
 
 claude-agent/
+
+# patch-variant oracle build output
+harnesses/dotnet_fuzz/patch_variants/ldap_dn_oracle/bin/
+harnesses/dotnet_fuzz/patch_variants/ldap_dn_oracle/obj/
+
+# patch-variant framing oracle build output
+.labs/dotnet/h-chunk-framing/bin/
+.labs/dotnet/h-chunk-framing/obj/
+.labs/dotnet/h-chunk-framing/*.log
+
+# stray workspace snapshots (can be many GB)
+workspace-*-before-*/
+
+# harness build output and fuzzing corpora - rebuildable, and bin/ carries
+# redistributed Microsoft assemblies that must not live in the repo
+harnesses/**/bin/
+harnesses/**/obj/
+harnesses/dbms_fuzz/corpus/
+
+# backup of the pre-Claude launcher
+*.codex-backup
+
+# compiled patch-variant oracles (rebuildable from the adjacent source)
+harnesses/dotnet_fuzz/patch_variants/*/oracle

@@ -1,0 +1,41 @@
+{
+  "targets": {
+    "redis": {
+      "host": "127.0.0.1",
+      "port": 56379,
+      "container": "zerodaycloud-redis",
+      "source": "targets/zdc-2026-redis-8.10.2",
+      "instrumentation": "source-copy: afl++ or clang ASan/UBSan"
+    },
+    "mariadb": {
+      "host": "127.0.0.1",
+      "port": 53306,
+      "container": "zerodaycloud-mariadb",
+      "source": "targets/zdc-2026-mariadb-13.0.2",
+      "instrumentation": "source-copy: afl++ or clang ASan/UBSan"
+    },
+    "mysql": {
+      "host": "127.0.0.1",
+      "port": 53307,
+      "container": "zerodaycloud-mysql",
+      "source": null,
+      "instrumentation": "requires authorized MySQL source checkout or black-box mode"
+    },
+    "postgresql": {
+      "host": "127.0.0.1",
+      "port": 55432,
+      "debug_port": 55433,
+      "instrumented_port": 55434,
+      "container": "zerodaycloud-postgresql",
+      "source": "targets/zdc-2026-postgresql-18.6",
+      "instrumentation": "source-copy: afl++ or clang ASan/UBSan; debug mirror on 55433"
+    },
+    "oracle": {
+      "host": "127.0.0.1",
+      "port": 51521,
+      "container": "zerodaycloud-oracle",
+      "source": null,
+      "instrumentation": "black-box TNS/SQL unless an authorized instrumentable build is supplied"
+    }
+  }
+}

@@ -1,0 +1,32 @@
+{
+  "repositories": [
+    {
+      "github": "dotnet/runtime",
+      "target": "targets/dotnet-runtime-10.0.12",
+      "current_tag": "v10.0.12"
+    },
+    {
+      "github": "dotnet/aspnetcore",
+      "target": "targets/dotnet-aspnetcore-10.0.12",
+      "current_tag": "v10.0.12"
+    }
+  ],
+  "minimum_year": 2024,
+  "supported_majors": [8, 9, 10],
+  "always_compare": [
+    {
+      "repository": "dotnet/runtime",
+      "base": "v10.0.11",
+      "head": "v10.0.12",
+      "reason": "current servicing delta",
+      "priority": 58
+    },
+    {
+      "repository": "dotnet/aspnetcore",
+      "base": "v10.0.11",
+      "head": "v10.0.12",
+      "reason": "current servicing delta",
+      "priority": 58
+    }
+  ]
+}

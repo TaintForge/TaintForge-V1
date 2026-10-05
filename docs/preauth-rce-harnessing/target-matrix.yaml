@@ -1,0 +1,64 @@
+captured_at: "2026-09-26"
+timezone: Asia/Seoul
+competition_repository: https://github.com/wiz-sec-public/zeroday-cloud-2026
+success_condition: unauthenticated execution of the target-specific /flag.sh command
+
+targets:
+  redis:
+    compose_image: redis:latest
+    observed_version: 8.10.2
+    oci_index_digest: sha256:718f745deb7dfefeac6eed7041fc7ec9476b50e61b247932682457c41adafa0e
+    linux_amd64_digest: sha256:7ef5b5cec96495a04ca7feff88a9492efeab8053fb284d24bdd73344c9245a48
+    tcp_port: 6379
+    authentication: requirepass
+    eligible_start: unauthenticated TCP connection
+    forbidden_start: password or authenticated connection
+    flag_command: /flag.sh redis
+    initial_tracks:
+      - resp_request_parser
+      - auth_gate_state_invariants
+      - stateful_wire_replay
+
+  mariadb:
+    compose_image: mariadb:latest
+    observed_version: 13.0.2-resolute
+    oci_index_digest: sha256:d4fdec0510ad498e4f3127da30a99df3745bd6d5e611ae6ac5f76403d9284a8d
+    linux_amd64_digest: sha256:6fbfe8d506c67660f81ec9859e45080ec6df6bd5ecdc761b82a33906179147cd
+    tcp_port: 3306
+    authentication: enabled
+    local_infile: disabled
+    eligible_start: unauthenticated TCP connection
+    forbidden_start: demo/root password or authenticated connection
+    flag_command: /flag.sh mariadb
+    initial_tracks:
+      - handshake_capability_grammar
+      - authentication_plugin_state_machine
+      - tls_transition_and_wire_replay
+
+  postgresql:
+    compose_image: postgres:latest
+    observed_version: "18.6"
+    oci_index_digest: sha256:5a5a84b19854a9ffaa54082c166ff4ec27473a361e496e5ea167f298f2da9722
+    linux_amd64_digest: sha256:0377e72c5289ed2f98cf61b1a9c2db9eb9d300317fe14244492fbc94343b3d04
+    tcp_port: 5432
+    authentication: enabled
+    eligible_start: unauthenticated TCP connection
+    forbidden_start: demo/postgres password or authenticated connection
+    flag_command: /flag.sh postgresql
+    initial_tracks:
+      - startup_special_request_state_machine
+      - sasl_scram_authentication_exchange
+      - process_aware_wire_replay
+
+common_build_matrix:
+  - clang_asan_ubsan_debug
+  - clang_asan_release
+  - clang_msan_when_supported
+  - 32bit_asan_when_supported
+  - exact_stock_image
+
+promotion_rules:
+  crash: sanitizer finding or reproducible abnormal process/thread/backend termination
+  candidate: attacker-controlled pre-auth memory primitive or authentication-state invariant violation
+  exploitation: deterministic primitive reproduced on the exact stock image
+  confirmed_rce: exact stock image executes the target-specific /flag.sh command without authentication
