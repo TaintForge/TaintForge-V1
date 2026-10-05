@@ -342,14 +342,14 @@ run_model() {
             --config sandbox_workspace_write.network_access=true \
             --config web_search=live \
             --model "${TF_MODEL_REASON:-gpt-6-sol}" \
-            --config model_reasoning_effort=xhigh "$prompt"
+            --config model_reasoning_effort=xhigh "$prompt" < /dev/null
           ;;
         *)
           codex exec --sandbox workspace-write \
             --config sandbox_workspace_write.network_access=true \
             --config web_search=live \
             --model "${TF_MODEL:-gpt-daybreak-blue-latest}" \
-            --config model_reasoning_effort=max "$prompt"
+            --config model_reasoning_effort=max "$prompt" < /dev/null
           ;;
       esac
       ;;
@@ -358,7 +358,7 @@ run_model() {
         --output-format stream-json --verbose \
         --dangerously-skip-permissions \
         --model "${TF_MODEL:-claude-opus-5}" \
-        "$prompt"
+        "$prompt" < /dev/null
       ;;
   esac
 }

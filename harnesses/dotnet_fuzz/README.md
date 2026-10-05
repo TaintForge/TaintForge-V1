@@ -138,3 +138,13 @@ backoff. Watch for `died after Ns; backing off` in the role log.
 Lower `TF_ROLES` to reduce burn: `TF_ROLES="A B C H"` runs the two producers,
 triage, and the patch-variant lane, which is roughly half the consumption of the
 full set.
+
+### Backend status, as last verified
+
+| backend | state |
+| --- | --- |
+| `claude` | verified end to end; the pane renders `stream-json` correctly |
+| `codex` | code path restored and the command string verified, but **not** smoke-tested: the account's Codex quota was exhausted (`You've hit your usage limit ... try again at Oct 10th, 2026`). Auth itself is fine. |
+
+Both invocations close stdin. Passing the prompt as argv while leaving stdin open
+makes either CLI wait for piped input before it starts.
