@@ -33,22 +33,47 @@ LANG2TS={
     "rust":"rust","c":"c","cpp":"cpp","kotlin":"kotlin","scala":"scala","python":"python",
 }
 
+_BACKEND=None
+
+def _load_backend():
+    """Return an object exposing get_parser(name), or None.
+
+    tree-sitter-languages 1.10.2 has no wheels for Python >= 3.12, so fall back to
+    tree-sitter-language-pack, which ships the same grammar names on a modern core.
+    """
+    global _BACKEND
+    if _BACKEND is not None:
+        return _BACKEND or None
+    errs=[]
+    try:
+        import tree_sitter_languages as tsl
+        # Don't trust import alone - the common failure is a tree-sitter CORE version mismatch
+        # (0.25.x core vs the 0.21-era API tree-sitter-languages 1.10.2 was built against),
+        # which imports fine but throws on get_parser. So actually build a parser.
+        tsl.get_parser("php")
+        _BACKEND=tsl
+        return _BACKEND
+    except Exception as e:
+        errs.append(f"tree_sitter_languages: {e}")
+    try:
+        import tree_sitter_language_pack as tslp
+        tslp.get_parser("php")
+        _BACKEND=tslp
+        return _BACKEND
+    except Exception as e:
+        errs.append(f"tree_sitter_language_pack: {e}")
+    import sys
+    print(f"[ts_extract] tree-sitter unavailable, using regex fallback: {'; '.join(errs)}", file=sys.stderr)
+    print("[ts_extract] fix: pip install tree-sitter-language-pack  (py>=3.12), or "
+          "pip install 'tree-sitter==0.21.3' 'tree-sitter-languages==1.10.2' --break-system-packages",
+          file=sys.stderr)
+    _BACKEND=False
+    return None
+
 def ts_available():
     global _OK
     if _OK is None:
-        try:
-            import tree_sitter_languages as tsl
-            # Don't trust import alone - the common failure is a tree-sitter CORE version mismatch
-            # (0.25.x core vs the 0.21-era API tree-sitter-languages 1.10.2 was built against),
-            # which imports fine but throws on get_parser. So actually build a parser.
-            tsl.get_parser("php")
-            _OK=True
-        except Exception as e:
-            import sys
-            print(f"[ts_extract] tree-sitter unavailable, using regex fallback: {e}", file=sys.stderr)
-            print("[ts_extract] fix: pip install 'tree-sitter==0.21.3' "
-                  "'tree-sitter-languages==1.10.2' --break-system-packages", file=sys.stderr)
-            _OK=False
+        _OK = _load_backend() is not None
     return _OK
 
 def _parser(lang):
@@ -56,8 +81,8 @@ def _parser(lang):
     if not ts: return None
     if ts not in _PARSERS:
         try:
-            import tree_sitter_languages as tsl
-            _PARSERS[ts]=tsl.get_parser(ts)
+            tsl=_load_backend()
+            _PARSERS[ts]=tsl.get_parser(ts) if tsl else None
         except Exception:
             _PARSERS[ts]=None
     return _PARSERS[ts]
@@ -177,6 +202,13 @@ def extract(rel, lang, text, module, make_symbol, classify_sink, KEYWORDS):
     src=text.encode("utf8","replace")
     try:
         tree=p.parse(src)
+    except TypeError:
+        # Some cores (tree-sitter-language-pack builds) take str, not bytes. Node offsets
+        # stay byte offsets either way, so keep slicing against the encoded copy.
+        try:
+            tree=p.parse(text)
+        except Exception:
+            return None
     except Exception:
         return None
     fdefs=FUNC_DEFS.get(lang,{}); cdefs=CLASS_DEFS.get(lang,set()); calls=CALL_NODES.get(lang,set())

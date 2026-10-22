@@ -5,7 +5,7 @@
 #   A - injection / data-flow producer
 #   B - logic / access-control producer
 #   C - cross-validation, reproduction, disclosure, and triage
-#   D - Daybreak exploitation and RCE chaining
+#   D - exploitation and RCE chaining
 #   E - needs_reanalysis diagnosis and retriage
 #   F - adaptive DBMS protocol/SQL memory-corruption fuzzing (TF_DBMS_FUZZ=1)
 #
@@ -98,11 +98,11 @@ if [ "${TF_BACKEND:-codex}" = "claude" ]; then
   CODEX_CMD_F="${CODEX_CMD_F:-$_tf_claude}"
 fi
 
-CODEX_CMD="${CODEX_CMD:-codex exec --sandbox workspace-write}"
+CODEX_CMD="${CODEX_CMD:-codex exec --sandbox workspace-write --config sandbox_workspace_write.network_access=true --config web_search=live --model gpt-6-sol --config model_reasoning_effort=xhigh}"
 CODEX_CMD_C="${CODEX_CMD_C:-codex exec --sandbox workspace-write --config sandbox_workspace_write.network_access=true --config web_search=live --model gpt-6-sol --config model_reasoning_effort=xhigh}"
-CODEX_CMD_D="${CODEX_CMD_D:-codex exec --sandbox workspace-write --config sandbox_workspace_write.network_access=true --model gpt-daybreak-blue-latest --config model_reasoning_effort=max}"
+CODEX_CMD_D="${CODEX_CMD_D:-codex exec --sandbox workspace-write --config sandbox_workspace_write.network_access=true --config web_search=live --model gpt-6-sol --config model_reasoning_effort=xhigh}"
 CODEX_CMD_E="${CODEX_CMD_E:-codex exec --sandbox workspace-write --config sandbox_workspace_write.network_access=true --config web_search=live --model gpt-6-sol --config model_reasoning_effort=xhigh}"
-CODEX_CMD_F="${CODEX_CMD_F:-codex exec --sandbox workspace-write --config sandbox_workspace_write.network_access=true --model gpt-daybreak-blue-latest --config model_reasoning_effort=max}"
+CODEX_CMD_F="${CODEX_CMD_F:-codex exec --sandbox workspace-write --config sandbox_workspace_write.network_access=true --config web_search=live --model gpt-6-sol --config model_reasoning_effort=xhigh}"
 
 if [ "${TF_REUSE_SEED:-0}" = "1" ]; then
   echo "== seed: validating and reusing existing Code Model, coverage, and hypotheses =="
@@ -183,9 +183,18 @@ else
   echo "== no --url: static-only mode =="
 fi
 
+if [ -n "${TAINTFORGE_DYNAMIC_CONTEXT:-}" ]; then
+  DYNAMIC_CONTEXT="$TAINTFORGE_DYNAMIC_CONTEXT"
+  echo "== custom dynamic target context enabled =="
+fi
+
 COMMON_CONTEXT="You are one independent persistent role in an authorized TaintForge white-box
-assessment. Do not delegate to subagents. Read AGENTS.md completely and then read the skill named
-by your role before acting.
+assessment. Do not delegate to subagents. Read AGENTS.md completely, then
+.agents/skills/_shared/METHODOLOGY.md completely, then the skill named by your role, before
+acting. The methodology binds every role: decide each defect's shape (flow vs missing control)
+before routing it, treat identity state, stored values, post-free and bailout-orphaned state,
+cross-scope state and ordering as attacker sources, and run the mandatory passes your role owns
+rather than stopping at the first source-to-sink hit.
 
 Repository root: $ROOT
 Read-only assessment target: $TARGET
@@ -229,10 +238,25 @@ already marked needs_reanalysis; do not duplicate E's feedback work."
 MISSION_C="$COMMON_CONTEXT
 
 You are C, the convergence and triage consumer. Read the convergence skill completely. Continuously
-consume candidate and cross_validated findings while A and B produce them. Independently validate
+consume candidate, cross_validated, and reproduced-awaiting-official-review findings while A and B produce them. Independently validate
 the exact source-to-sink or entry-to-resource path, reproduce it against only the authorized live
-target, deduplicate it, determine disclosure status only after proof, emit a vulnerability-specific
-PoC, and regenerate report/report.md. Rank pre-auth RCE first and authenticated RCE second. Treat
+target, and deduplicate it. Reproduction proves behavior only. Before confirmation, compare the
+exact behavior, version, supported/default configuration, documented security boundary, and sink
+ownership with primary official/vendor documentation, API contracts, security guidance, default
+templates/samples, versioned source/tests, advisories, release notes, patches, and vendor-owned
+issues. Record official_review with at least one public primary official/vendor documentation,
+advisory, release, patch, issue, or discussion URL; local source/test paths and GitHub blob/tree/raw
+source links alone do not satisfy the gate. Only product_vulnerability or known_vulnerability may
+become confirmed; documented hazards, expected behavior, application misconfiguration, and unsupported
+scenarios become not_product_vulnerability; inconclusive reviews remain reproduced. Determine
+disclosure status only after that gate passes. Before \`novel\`, derive exact source anchors, run
+git-history/path searches, compare the tested tag with upstream main and supported release branches,
+search open/closed vendor issues and open/merged PRs, follow backports, and check advisories/CVEs and
+release/servicing notes. A matching public source fix is known even without a CVE or security label.
+Record every category in disclosure.public_history; missing evidence means inconclusive and must not
+receive a potential-0-day label. Emit a PoC/report and regenerate report/report.md only after these
+gates.
+Rank pre-auth RCE first and authenticated RCE second. Treat
 lower-impact findings mainly as possible links toward code execution. When proof is inconclusive,
 set needs_reanalysis with a precise, actionable reason; E owns that state and will return only
 newly supported items for retriage."
@@ -240,7 +264,8 @@ newly supported items for retriage."
 MISSION_D="$COMMON_CONTEXT
 
 You are D, the exploitation and RCE-chain agent. Read the convergence skill completely. Work only
-from reproduced or confirmed findings and linked primitives that can credibly end in code
+from confirmed findings whose official_review verdict is product_vulnerability or
+known_vulnerability, plus linked primitives that can credibly end in code
 execution. Push pre-auth RCE first, then authenticated RCE, verifying every escalation step on the
 authorized lab target. Defeat actual parser, sanitizer, quoting, protocol, and state constraints;
 do not overstate bounded impact. Write the exploit object only through write_finding.py and emit a
@@ -261,7 +286,7 @@ without new evidence. Never bounce a finding unchanged. Record every update only
 write_finding.py, then continue polling."
 
 MISSION_F="You are F, the adaptive DBMS memory-corruption fuzzing producer in an authorized local
-TaintForge campaign. Do not delegate. Read AGENTS.md and the dbms-fuzzing skill completely before
+TaintForge campaign. Do not delegate. Read AGENTS.md, .agents/skills/_shared/METHODOLOGY.md, and the dbms-fuzzing skill completely before
 acting.
 
 Repository root: $ROOT

@@ -44,7 +44,15 @@
     },
     "vuln_class": {
       "type": "string",
-      "description": "e.g. sql-injection, command-injection, xss, deserialization, idor, broken-access-control, auth-bypass, business-logic."
+      "description": "Kebab-case class tag, e.g. sql-injection, command-injection, xss, deserialization, idor, broken-access-control, auth-bypass, business-logic, use-after-free, toctou-race, crypto-misuse, info-leak, dos, misconfiguration, supply-chain. See .agents/skills/_shared/METHODOLOGY.md section 7 for the full tag list."
+    },
+    "defect_shape": {
+      "type": "string",
+      "enum": [
+        "flow",
+        "missing_control"
+      ],
+      "description": "Which of the two defect shapes this is. flow = attacker-influenced value reaches a dangerous operation (source/propagation/sink must all be stated). missing_control = a required check is absent from a reachable path (missing_control must be stated). A class does not decide the shape; the evidence does."
     },
     "cwe": {
       "type": "string",
@@ -151,6 +159,134 @@
         }
       }
     },
+    "missing_control": {
+      "type": "object",
+      "description": "Required for defect_shape=missing_control. States WHICH control is absent and from WHICH reachable path - the absence shape has no taint to show, so this is its evidence.",
+      "properties": {
+        "control": {
+          "type": "string",
+          "description": "The control that should exist, e.g. 'ownership check on the loaded object', 'capability check current_user_can(edit_posts)', 'CSRF token verification', 'lock around read-then-debit'."
+        },
+        "expected_at": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "file:line (or symbol) locations where the control should sit, e.g. the handler, the service method, the middleware layer."
+        },
+        "unguarded_path": {
+          "type": "string",
+          "description": "The concrete reachable path that reaches the privileged operation without the control: entry point -> ... -> operation."
+        },
+        "actor": {
+          "type": "string",
+          "description": "The actor who can take the path, e.g. 'unauthenticated', 'any authenticated user', 'contributor', 'tenant B user'."
+        },
+        "evidence": {
+          "type": "string",
+          "description": "Why the control is genuinely absent on this path - which callers were enumerated, which layer was checked, where the equivalent check does exist for comparison."
+        }
+      }
+    },
+    "reachability": {
+      "type": "object",
+      "description": "Who can trigger this, with what privilege. 'Reachable' is proven by an entry point plus a call chain, never assumed from a route name. Required before a finding may become confirmed.",
+      "properties": {
+        "entry_point": {
+          "type": "string",
+          "description": "The externally reachable trigger, e.g. 'POST /wp-admin/admin-ajax.php?action=find_posts', 'queue consumer onMessage', 'exported Activity com.x.Y'."
+        },
+        "min_privilege": {
+          "type": "string",
+          "description": "Lowest privilege that reaches the defect, e.g. 'unauthenticated', 'subscriber', 'any tenant member', 'local user in the docker group'."
+        },
+        "pre_auth": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "description": "True when reachable with no authentication at all; null when not applicable to this target type."
+        },
+        "call_chain": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Ordered symbols or file:line hops from the entry point to the sink / privileged operation. This is the reachability proof."
+        },
+        "notes": {
+          "type": "string"
+        }
+      }
+    },
+    "preconditions": {
+      "type": "object",
+      "description": "What has to be true for the defect to exist. Keeps a non-default-configuration bug from being reported as if it fired out of the box.",
+      "properties": {
+        "default_configuration": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "description": "True when the preconditions hold in the default/vendor-shipped configuration; false when a non-default setting is required; null when undetermined."
+        },
+        "required_settings": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Exact non-default settings, plugins, build flags, roles, or deployment modes the defect needs."
+        },
+        "notes": {
+          "type": "string"
+        }
+      }
+    },
+    "primitive": {
+      "type": "object",
+      "description": "The capability actually proven, and the honest ceiling of it. Guards against over-packaging: an unproven escalation is recorded in ruled_out, never in the title.",
+      "properties": {
+        "kinds": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "read",
+              "write",
+              "delete",
+              "crash",
+              "hang",
+              "leak",
+              "authz-bypass",
+              "authn-bypass",
+              "code-exec",
+              "state-change",
+              "resource-exhaustion",
+              "other"
+            ]
+          },
+          "description": "The base capabilities demonstrated."
+        },
+        "escalation_ceiling": {
+          "type": "string",
+          "description": "The highest impact actually proven, stated as a bound - e.g. 'read-only, self-owned objects only', 'DoS only: no control over the freed chunk contents', 'authz bypass to contributor-level publish; no path to admin found'."
+        },
+        "ruled_out": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Escalations that were attempted and did NOT work, with the reason. Absence of an attempt is not a rule-out."
+        }
+      }
+    },
+    "assets_affected": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Which assets from the threat model this touches, e.g. 'session secrets', 'other users' draft content', 'funds', 'integrity of the permission model', 'availability of the API worker pool'."
+    },
     "sanitizers_seen": {
       "type": "array",
       "items": {
@@ -170,9 +306,10 @@
         "needs_reanalysis",
         "reproduced",
         "false_positive",
+        "not_product_vulnerability",
         "confirmed"
       ],
-      "description": "Lifecycle. candidate -> cross_validated -> reproduced -> confirmed. Repro failure can route to false_positive OR needs_reanalysis (feedback loop)."
+      "description": "Lifecycle. candidate -> cross_validated -> reproduced -> official_review -> confirmed. A disproved reproduction is false_positive; reproduced behavior that official/vendor evidence identifies as expected, unsupported, a documented hazard, or application misconfiguration is not_product_vulnerability."
     },
     "repro": {
       "type": "object",
@@ -198,6 +335,21 @@
         "env": {
           "type": "string",
           "description": "Which warm target env was used."
+        },
+        "reliability": {
+          "type": "string",
+          "description": "How repeatable the reproduction is, e.g. '10/10 runs', '3/50 runs - race window is narrow'. Required honesty for races, TOCTOU, and heap-state-dependent bugs."
+        },
+        "instrumentation_only": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "description": "True when the observation so far exists only under a sanitizer, debug assertion, patched build, or diagnostic probe. Such an observation is a lead, not a finding, until stock_replay succeeds."
+        },
+        "stock_replay": {
+          "type": "string",
+          "description": "Result of replaying on the exact stock/uninstrumented build or release artifact, including its version/build id. Empty means not yet attempted."
         },
         "response": {
           "type": "string",
@@ -385,6 +537,7 @@
               "track-w",
               "cross-validation",
               "reproduction",
+              "official-review",
               "triage",
               "exploitation"
             ]
@@ -407,9 +560,63 @@
       "type": "string",
       "format": "date-time"
     },
+    "official_review": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Mandatory product-boundary review after reproduction and before confirmation. Terminal verdicts must identify the exact product version, assess whether the precondition is default/vendor-generated, and compare the reproduced behavior with official vendor documentation, API contracts, security guidance, default templates/samples, source comments/tests, advisories, release notes, patches, and vendor-owned issue discussions.",
+      "required": [
+        "checked",
+        "verdict",
+        "sources",
+        "rationale"
+      ],
+      "properties": {
+        "checked": {
+          "type": "boolean",
+          "description": "True only after the official/vendor evidence review was actually performed."
+        },
+        "verdict": {
+          "type": "string",
+          "enum": [
+            "product_vulnerability",
+            "known_vulnerability",
+            "documented_hazard",
+            "expected_behavior",
+            "application_misconfiguration",
+            "unsupported_scenario",
+            "inconclusive"
+          ],
+          "description": "product_vulnerability = reproduced behavior violates the supported product's stated/default security boundary; known_vulnerability = official advisory/CVE/patch already identifies the same bug; documented_hazard = official guidance explicitly describes the exact unsafe ordering/configuration and its mitigation; expected_behavior = official contract/tests intentionally require the behavior; application_misconfiguration = impact exists only because app-authored configuration or a sink creates it contrary to defaults/guidance; unsupported_scenario = reproduction depends on an explicitly unsupported deployment or mode; inconclusive = official evidence is insufficient or contradictory."
+        },
+        "sources": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string"
+          },
+          "description": "Official/vendor materials examined so far. A terminal confirmed/not_product_vulnerability verdict is additionally gated by write_finding.py and must include at least one public URL to official documentation, security guidance/advisory, release/patch note, or vendor-owned repository issue/discussion. Local source paths and GitHub blob/tree/raw source URLs are supporting evidence only and cannot pass the gate alone."
+        },
+        "rationale": {
+          "type": "string",
+          "minLength": 20,
+          "description": "Exact comparison between the reproduction, supported/default configuration, documented contract, and vendor guidance. State why the behavior is or is not a product vulnerability."
+        },
+        "product_version": {
+          "type": "string",
+          "description": "Exact product/version/build reviewed."
+        },
+        "default_configuration": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "description": "Whether the vulnerable preconditions occur in a vendor-generated or default supported configuration; null when not determinable."
+        }
+      }
+    },
     "disclosure": {
       "type": "object",
-      "description": "Set by convergence AFTER reproduction: is this already public (known CVE/advisory) or novel?",
+      "description": "Set by convergence only after official_review says the behavior is a real product vulnerability. Novel classification additionally requires an exact-match public-history review across source history, upstream head/release code, vendor issues/PRs, and advisories/releases.",
       "properties": {
         "checked": {
           "type": "boolean"
@@ -421,24 +628,76 @@
             "known",
             "inconclusive"
           ],
-          "description": "novel = no public report found; known = matches a published CVE/advisory; inconclusive = unsure"
+          "description": "novel = no matching public issue, PR, commit, patch, advisory, CVE, release note, or changelog entry was found after the public_history search ladder; known = any exact public vendor match exists, even without a CVE/security label; inconclusive = unsure"
         },
         "references": {
           "type": "array",
           "items": {
             "type": "string"
           },
-          "description": "CVE ids / advisory URLs found via web search"
+          "description": "Exact public vendor issue, PR, commit, patch, advisory, CVE, release, or changelog URLs. A matching public source-level fix is known disclosure even when it has no CVE or security label."
         },
         "rationale": {
           "type": "string",
           "description": "why classified novel/known (what the search showed)"
+        },
+        "public_history": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Mandatory search evidence before status=novel. Record exact anchors and the concrete searches/comparisons performed; absence of a CVE or advisory alone is never enough.",
+          "required": [
+            "checked",
+            "upstream_repository",
+            "exact_anchors",
+            "source_history",
+            "vendor_issues_prs",
+            "advisories_releases",
+            "head_or_release_comparison"
+          ],
+          "properties": {
+            "checked": {
+              "type": "boolean"
+            },
+            "upstream_repository": {
+              "type": "string",
+              "description": "Canonical public upstream repository HTTPS URL."
+            },
+            "exact_anchors": {
+              "type": "array",
+              "minItems": 2,
+              "items": {"type": "string", "minLength": 1},
+              "description": "At least two exact patch fingerprints, such as file+symbol, helper/flag, rejection reason, distinctive literal, or protocol invariant."
+            },
+            "source_history": {
+              "type": "array",
+              "minItems": 1,
+              "items": {"type": "string", "minLength": 1},
+              "description": "git log -S/-G commands/results, GitHub commit-history/API URLs, blame/history checks, or exact public commit searches for the affected path."
+            },
+            "vendor_issues_prs": {
+              "type": "array",
+              "minItems": 1,
+              "items": {"type": "string", "minLength": 1},
+              "description": "Vendor repository issue/PR searches using exact symbols and semantic variants, including closed/merged items and linked backports."
+            },
+            "advisories_releases": {
+              "type": "array",
+              "minItems": 1,
+              "items": {"type": "string", "minLength": 1},
+              "description": "Vendor advisories, CVEs, release notes, changelogs, and servicing/backport searches."
+            },
+            "head_or_release_comparison": {
+              "type": "string",
+              "minLength": 20,
+              "description": "Exact comparison of the tested version with current upstream main and applicable supported release branch. Any matching public hardening diff makes the finding known."
+            }
+          }
         }
       }
     },
     "exploit": {
       "type": "object",
-      "description": "Deep exploitation result from agent D (only for critical reproduced findings)",
+      "description": "Deep exploitation result from agent D (only for critical confirmed findings that passed the official/vendor product-boundary gate)",
       "properties": {
         "depth": {
           "type": "string",

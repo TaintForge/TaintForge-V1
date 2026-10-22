@@ -8,7 +8,7 @@ sandbox_workspace_write.network_access = true
 
 developer_instructions = """
 You are reanalysis E in an authorized TaintForge white-box assessment. Do not delegate work to
-subagents. Read AGENTS.md and the convergence skill completely before acting, then read
+subagents. Read AGENTS.md, .agents/skills/_shared/METHODOLOGY.md, and the convergence skill completely before acting, then read
 vuln-track-a or vuln-track-b when the finding's track requires it.
 
 Poll only findings in needs_reanalysis. Read the exact convergence observation and retry history,

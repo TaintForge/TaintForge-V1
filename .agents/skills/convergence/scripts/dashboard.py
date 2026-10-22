@@ -1,12 +1,16 @@
 #!/usr/bin/env python3
 """dashboard.py - live status panel for TaintForge (refreshes in place)."""
 import json, os, glob, time, collections, sys, subprocess
+from official_review import (
+    confirmation_gate_passes, needs_public_history_work, novelty_gate_passes, review_state
+)
 
 C = {"reset":"\033[0m","dim":"\033[2m","b":"\033[1m","cyan":"\033[36m","grn":"\033[32m",
      "yel":"\033[33m","red":"\033[31m","mag":"\033[35m","blu":"\033[34m","gry":"\033[90m"}
 SEV = {"critical":C["red"],"high":C["red"],"medium":C["yel"],"low":C["blu"],"info":C["gry"]}
 STT = {"candidate":C["gry"],"cross_validated":C["cyan"],"reproduced":C["grn"],
-       "confirmed":C["grn"]+C["b"],"false_positive":C["dim"],"needs_reanalysis":C["mag"]}
+       "confirmed":C["grn"]+C["b"],"not_product_vulnerability":C["dim"],
+       "false_positive":C["dim"],"needs_reanalysis":C["mag"]}
 START = time.time()
 
 def load(p):
@@ -38,14 +42,25 @@ def main():
         out.append(f"{C['gry']}  ────────────────────────────────────{C['reset']}")
         out.append(f"  {C['b']}coverage{C['reset']}  {bar(done,len(mods))} {done}/{len(mods)} modules")
         out.append(f"  {C['b']}findings{C['reset']}  {len(fs)} total")
-        novel=[f for f in fs if (f.get("disclosure") or {}).get("status")=="novel"]
-        if novel: out.append(f"  {C['b']}{C['red']}\u26a0 potential 0-day{C['reset']}  {len(novel)} (novel, reproduced)")
-        exps=[f for f in fs if f.get("exploit")]
+        reportable=[f for f in fs if confirmation_gate_passes(f)]
+        pending_review=[f for f in fs if f.get("status") in ("reproduced","confirmed")
+                        and not confirmation_gate_passes(f)]
+        rejected=[f for f in fs if f.get("status")=="not_product_vulnerability"
+                  or review_state(f)=="non_product"]
+        history_pending=[f for f in reportable if needs_public_history_work(f)]
+        novel=[f for f in reportable if novelty_gate_passes(f)]
+        out.append(f"  {C['b']}official gate{C['reset']}  {len(reportable)} reportable, "
+                   f"{len(pending_review)} pending, {len(rejected)} non-product")
+        if history_pending:
+            out.append(f"  {C['b']}{C['yel']}public history pending{C['reset']}  {len(history_pending)}")
+        if novel: out.append(f"  {C['b']}{C['red']}\u26a0 potential 0-day{C['reset']}  {len(novel)} (official + source-history reviewed)")
+        exps=[f for f in reportable if f.get("exploit")]
         weap=[f for f in exps if (f.get("exploit") or {}).get("depth")=="weaponized"]
         chained=[f for f in exps if (f.get("exploit") or {}).get("depth")=="chained"]
         if exps:
             out.append(f"  {C['b']}{C['red']}\U0001f4a5 exploited{C['reset']}  {len(weap)} weaponized, {len(chained)} chained")
-        for s in ["confirmed","reproduced","cross_validated","candidate","needs_reanalysis","false_positive"]:
+        for s in ["confirmed","reproduced","cross_validated","candidate","needs_reanalysis",
+                  "not_product_vulnerability","false_positive"]:
             if st.get(s): out.append(f"      {STT.get(s,'')}{s:<16}{C['reset']} {st[s]}")
         if cl:
             out.append(f"  {C['b']}by class{C['reset']}")

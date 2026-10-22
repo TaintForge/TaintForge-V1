@@ -10,9 +10,16 @@ Tools (Semgrep/OpenGrep) only hand you LEADS to look at faster - they create not
 Every finding here is authored by YOU via `write_finding.py`. If the tool finds nothing,
 you still hunt by reading the code.
 
-Track A = anything where untrusted input flows into a dangerous sink (SQLi, command/code
-injection, XSS, SSRF, path traversal, deserialization, XXE, SSTI, NoSQL, open redirect).
-Authorization/logic bugs are Track B.
+Track A is the **flow-shape** track (`defect_shape: "flow"`): an attacker-influenced value
+reaches a dangerous operation (SQLi, command/code injection, XSS, SSRF, path traversal,
+deserialization, XXE, SSTI, NoSQL, open redirect — and the memory-safety, info-leak, and
+resource classes from METHODOLOGY §2). Missing-control-shape bugs are Track B. If what you
+found is really "a check is absent", file it with `defect_shape: "missing_control"` rather
+than squeezing it into a source→sink story — never drop it because it looks like Track B's.
+
+Read `.agents/skills/_shared/METHODOLOGY.md` first. You own mandatory passes **P4** (long-lived
+lifetime sweep), **P5** (taint into *all seven* sink groups), and, with B, **P6** (error-path
+diff) and **P7** (cross-scope/concurrency).
 
 Input: `workspace/CODE_MODEL.json` — two layers in the one file: `structural` (entry points,
 call graph, functions, sinks; Track A's main input) and `comprehension` (trust boundaries,
@@ -52,6 +59,31 @@ reachability and sanitizer absence/presence, then mark the sink unit `safe`, `fi
 > output sinks (XSS via render/send), re-run the build with TF_NOISY_SINKS=1, or trace those
 > calls manually with --callers - they are excluded by default to keep the proof ledger
 > tractable on big codebases.
+>
+> **This is a known blind spot, not a safety signal.** The ledger carries no disclosure-output
+> sinks (response headers, cookies, error bodies, logs, timing), no memory sinks (memcpy/index/
+> deref/function pointer), no control sinks (role/flag writes, dispatch tables, redirect
+> destinations), and no resource sinks (unbounded alloc/loop/recursion). Enumerate those four
+> groups by hand (METHODOLOGY §3) - "the ledger had no sink" never closes them.
+
+## 2c. Sources the call graph cannot show you (P4 / P6 / P7)
+
+Taint from a request parameter is one source family out of eight (METHODOLOGY §1). These four
+never appear in `dataflow.json`, and they are where the surviving bugs are:
+
+- **Post-free un-reset state** - a pointer/handle/fd/object freed or closed but still held by a
+  global, struct field, or registry, then reused (UAF). P4: for every long-lived field holding
+  one, find (a) the release site, (b) the reset site, (c) whether a bailout can land between
+  them. All three true = candidate.
+- **Bailout-orphaned state** - an exception, `longjmp`, panic, early return, OOM, or timeout
+  that skips cleanup. P6: diff the checks and cleanups that run on the success path against the
+  failure path; a skipped check is a bypass, a skipped release is a leak or a dangling handle.
+- **Cross-scope persistent state** - taint written by request A and consumed by request B, a
+  reused worker, another thread, shared memory, or a cache (second-order injection too). P7.
+- **Uninitialized reuse / metadata mismatch** - pool/arena residue, or a length/type/ownership/
+  refcount field that disagrees with the object it describes.
+
+These are read-the-code passes. Record partial capabilities with `leads.py` as you go.
 
 ## 3. Judge each candidate
 
@@ -68,15 +100,22 @@ reachability and sanitizer absence/presence, then mark the sink unit `safe`, `fi
 ## 4. Record real findings
 
 ```bash
-echo '{"track":"A","status":"candidate","vuln_class":"sql-injection","cwe":"CWE-89",
+echo '{"track":"A","status":"candidate","defect_shape":"flow",
+"vuln_class":"sql-injection","cwe":"CWE-89",
 "title":"...","severity_estimate":"high",
 "source":{"file":"...","line":42,"description":"attacker-controlled input"},
 "sink":{"file":"...","line":118,"description":"dangerous call"},
 "flow":[{"file":"...","line":77,"note":"how taint reaches the sink"}],
+"reachability":{"entry_point":"POST /api/...","min_privilege":"unauthenticated",
+"pre_auth":true,"call_chain":["handler","service.build_query","db.execute"]},
+"preconditions":{"default_configuration":true},
+"assets_affected":["customer records"],
 "sanitizers_seen":[],"evidence":"why this is exploitable",
 "_action":"found by reading code"}' \
 | .agents/skills/_shared/write_finding.py
 ```
+Fill `reachability` and `preconditions` now, while the call chain is in front of you - C
+cannot confirm the finding without them, and reconstructing them later is wasted work.
 Use REAL line numbers from the code you read. Never use `0` unless the exact line truly can't be
 determined - and then say why in the description. `status` is always `candidate` (C promotes it).
 

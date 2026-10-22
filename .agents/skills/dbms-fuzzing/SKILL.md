@@ -19,7 +19,13 @@ errors or ordinary server disconnects.
 - Do not store credentials in corpus, findings, logs, command lines, or tracked files. Read DSNs
   from a mode-0600 file named by `DBFUZZ_DSN_FILE` when authenticated SQL coverage is authorized.
 - A sanitizer hit or crash is a lead. Promote only after deterministic replay, source root-cause
-  analysis, and validation on the exact stock target.
+  analysis, and validation on the exact stock target. Record that honestly on the finding:
+  `repro.instrumentation_only` while it exists only under instrumentation,
+  `repro.stock_replay` with the stock build id once it replays there, and `repro.reliability`
+  (e.g. `3/50 runs`) for anything heap-state- or race-dependent. `write_finding.py` refuses to
+  confirm an instrumentation-only observation.
+- State the bound, not the hope: `primitive{kinds,escalation_ceiling,ruled_out}`. "DoS only: no
+  control over the freed chunk contents" is a complete finding; "potential RCE" is not.
 - Author candidate findings only through `.agents/skills/_shared/write_finding.py`, using track A.
 
 ## Choose lanes

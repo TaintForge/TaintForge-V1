@@ -38,15 +38,37 @@ for name in MAX_HOURS SPAWN_ONLY TF_REUSE_SEED TF_MAX_REANALYSIS \
   TF_BACKEND TF_MODEL \
   TF_DBMS_FUZZ TF_DBMS_ENGINES DBFUZZ_DSN_FILE \
   SSRF_HOST SSRF_PORT CANARY_HOST CANARY_PORT TAINTFORGE_EXTRA_CONTEXT \
+  TAINTFORGE_DYNAMIC_CONTEXT TF_PY \
   CODEX_CMD CODEX_CMD_A CODEX_CMD_B CODEX_CMD_C CODEX_CMD_D CODEX_CMD_E CODEX_CMD_F; do
   if [[ -v "$name" ]]; then
     RUNNER_ENV+=("$name=${!name}")
   fi
 done
-printf -v RUNNER_CMD '%q ' env "${RUNNER_ENV[@]}" "$HERE/audit.sh" "$@"
+# tmux hands the pane command to the user's default-shell, which is not necessarily
+# bash. Multi-line role context values do not survive that round trip as one quoted
+# argv, so write a tiny launcher script instead and run that.
+RUNNER_SH="workspace/_runner.sh"
+{
+  echo '#!/usr/bin/env bash'
+  echo 'set -Eeuo pipefail'
+  printf 'cd %q\n' "$HERE"
+  for kv in "${RUNNER_ENV[@]}"; do
+    printf 'export %s=%q\n' "${kv%%=*}" "${kv#*=}"
+  done
+  printf 'exec %q' "$HERE/audit.sh"
+  for a in "$@"; do printf ' %q' "$a"; done
+  printf '\n'
+} > "$RUNNER_SH"
+chmod +x "$RUNNER_SH"
+printf -v RUNNER_CMD '%q %q' bash "$HERE/$RUNNER_SH"
 P_RUNNER="$(tmux new-session -d -s "$SESS" -n runtime -x 250 -y 60 -c "$HERE" -P -F '#{pane_id}' "$RUNNER_CMD")"
 
-mklog() { printf 'tail -n +1 -F workspace/_log_%s.txt' "$1"; }
+# The claude backend writes stream-json JSONL; render it human-readable in the pane.
+if [ "${TF_BACKEND:-codex}" = "claude" ]; then
+  mklog() { printf 'tail -n +1 -F workspace/_log_%s.txt | python3 -u .agents/stream_fmt.py' "$1"; }
+else
+  mklog() { printf 'tail -n +1 -F workspace/_log_%s.txt' "$1"; }
+fi
 DASHBOARD="python3 $S/convergence/scripts/dashboard.py"
 
 P_A="$(tmux new-window -d -t "$SESS:" -n forge -c "$HERE" -P -F '#{pane_id}' "$(mklog A)")"
@@ -79,13 +101,23 @@ tmux set -t "$SESS" mouse on
 tmux setw -t "$SESS:runtime" remain-on-exit on
 tmux setw -t "$SESS:forge" remain-on-exit on
 
+# Pane titles name the model each role actually runs on, so a mixed-model
+# campaign (e.g. a stronger model on D only) is visible at a glance.
+rolemodel() {
+  local tag="$1" cmd
+  eval "cmd=\${CODEX_CMD_${tag}:-\${CODEX_CMD:-}}"
+  if [ -z "$cmd" ]; then
+    if [ "${TF_BACKEND:-codex}" = "claude" ]; then cmd="${TF_MODEL:-claude-opus-5}"; else cmd="gpt-6-sol xhigh"; fi
+  fi
+  sed -n 's/.*--model[ =]\([^ ]*\).*/\1/p' <<<"$cmd" | head -1 | grep . || echo "$cmd"
+}
 tmux select-pane -t "$P_RUNNER" -T "RUNTIME / supervisors"
-tmux select-pane -t "$P_A" -T "A  INJECT / data-flow"
-tmux select-pane -t "$P_B" -T "B  AUTH / logic"
-tmux select-pane -t "$P_C" -T "C  TRIAGE / GPT-6 Sol xhigh"
-tmux select-pane -t "$P_D" -T "D  EXPLOIT / Daybreak Blue max"
-tmux select-pane -t "$P_E" -T "E  REANALYSIS / GPT-6 Sol xhigh"
-[ -z "$P_F" ] || tmux select-pane -t "$P_F" -T "F  DBMS FUZZ / Daybreak Blue max"
+tmux select-pane -t "$P_A" -T "A  INJECT / data-flow  [$(rolemodel A)]"
+tmux select-pane -t "$P_B" -T "B  AUTH / logic  [$(rolemodel B)]"
+tmux select-pane -t "$P_C" -T "C  TRIAGE  [$(rolemodel C)]"
+tmux select-pane -t "$P_D" -T "D  EXPLOIT  [$(rolemodel D)]"
+tmux select-pane -t "$P_E" -T "E  REANALYSIS  [$(rolemodel E)]"
+[ -z "$P_F" ] || tmux select-pane -t "$P_F" -T "F  DBMS FUZZ  [$(rolemodel F)]"
 tmux select-pane -t "$P_DASH" -T "DASHBOARD"
 tmux select-window -t "$SESS:forge"
 tmux select-pane -t "$P_C"

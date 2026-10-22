@@ -49,3 +49,13 @@ harnesses/dbms_fuzz/corpus/
 
 # compiled patch-variant oracles (rebuildable from the adjacent source)
 harnesses/dotnet_fuzz/patch_variants/*/oracle
+
+# local lab account files (live test credentials) - keep accounts.json.example only
+*.accounts.json
+
+# editor/backup copies of the launchers
+*.bak
+
+# engagement output: unfiled vulnerability reports for a live bug-bounty target.
+# Never push these - publishing is a disclosure decision, not a commit.
+h1-wordpress/

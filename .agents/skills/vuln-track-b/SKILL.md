@@ -5,9 +5,16 @@ description: "Find logic and access-control vulnerabilities that data-flow tools
 
 # vuln-track-b (logic / access-control)
 
-Track B finds bugs where the data flow is fine but the *rules* are wrong: a user can
-reach a resource or action they shouldn't. Tools can't do this alone - they don't know
-what SHOULD be allowed. So a script gives you structural SEEDS and YOU do the reasoning.
+Track B is the **absence-shape** track (`defect_shape: "missing_control"`): the data flow is
+fine but the *rules* are wrong - a required check is not on a reachable path, so a user can
+reach a resource or action they shouldn't. Tools can't do this alone - they don't know what
+SHOULD be allowed. So a script gives you structural SEEDS and YOU do the reasoning.
+
+Read `.agents/skills/_shared/METHODOLOGY.md` first. You own mandatory passes **P1** (entry ×
+privilege map), **P2** (guard audit on every privileged operation), **P3** (invariant-violation
+sweep), and, with A, **P6** (error-path diff) and **P7** (cross-scope/concurrency). Beyond
+authz you also own the absence shape of crypto, configuration, supply chain, and the
+logic/state half of TOCTOU (METHODOLOGY §2) - those classes have no other owner.
 
 Input: `workspace/CODE_MODEL.json` (`comprehension` - route_map, permission_model,
 user_journeys, trust_boundaries). Output: `workspace/findings/*.json` (track `B`, candidate).
@@ -54,14 +61,28 @@ Walk `comprehension.user_journeys`:
 ## B4 - Emit findings
 
 ```bash
-echo '{"track":"B","vuln_class":"idor","cwe":"CWE-639",
+echo '{"track":"B","defect_shape":"missing_control","vuln_class":"idor","cwe":"CWE-639",
 "title":"...","severity_estimate":"high",
-"source":{"file":"...","line":0,"description":"attacker-controlled key"},
-"sink":{"file":"...","line":0,"description":"object load without ownership check"},
+"source":{"file":"app/http/OrderController.php","line":64,"description":"route param {id}"},
+"sink":{"file":"app/repo/OrderRepo.php","line":112,"description":"findById load, no ownership scope"},
+"missing_control":{"control":"ownership check order.user_id == session user",
+ "expected_at":["app/http/OrderController.php:70","app/repo/OrderRepo.php:112"],
+ "unguarded_path":"GET /orders/{id} -> OrderController@show -> OrderRepo::findById",
+ "actor":"any authenticated user",
+ "evidence":"all 3 callers of findById enumerated; the sibling InvoiceRepo scopes by user_id, this one does not"},
+"reachability":{"entry_point":"GET /orders/{id}","min_privilege":"any authenticated user",
+ "pre_auth":false,"call_chain":["OrderController@show","OrderRepo::findById"]},
+"preconditions":{"default_configuration":true},
+"assets_affected":["other customers order history"],
 "evidence":"why a different user can access it",
 "_action":"confirmed via handler read (B2)"}' \
 | .agents/skills/_shared/write_finding.py
 ```
+**Use real line numbers, never `line: 0`.** For this shape `sink` is the privileged
+operation's own location (the unscoped load, the state change, the capability-less action) and
+`source` is where the attacker-chosen key or identity enters. `missing_control` carries the
+actual evidence: which check, where it should sit, which path reaches the operation without
+it, and who can walk that path.
 
 ## Trace entry -> resource across files
 

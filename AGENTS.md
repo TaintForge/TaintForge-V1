@@ -14,7 +14,8 @@ sharing one streaming queue,
 - **B — producer, logic / access-control.** Skill: `vuln-track-b`.
 - **C — consumer, convergence.** Skill: `convergence`. Runs continuously while producers work.
 - **D — exploitation.** Skill: `convergence`. Takes only the critical findings C already
-  proved (reproduced/confirmed) and weaponizes them — chaining, escalating impact, defeating
+  reproduced and confirmed as product vulnerabilities through the official/vendor evidence gate,
+  then weaponizes them — chaining, escalating impact, defeating
   sanitizers — recording results in the finding's `exploit` object with **honest bounds**.
 - **E — reanalysis.** Skill: `convergence`, plus the producer skill matching the finding track.
   Owns `needs_reanalysis`, diagnoses the failed premise or missing evidence, and returns only
@@ -26,7 +27,33 @@ sharing one streaming queue,
 The primary objective is demonstrable **pre-authentication RCE**, followed by **authenticated
 RCE**. Lower-impact findings matter mainly when they provide a credible link in an RCE chain.
 
-Everything is glued by one contract: `schemas/finding.schema.json`.
+Everything is glued by one contract — `schemas/finding.schema.json` — and one method —
+`.agents/skills/_shared/METHODOLOGY.md`. **Read the methodology after this file and before
+your role skill.** It is class- and language-agnostic and every role is bound by it.
+
+## Method in one screen (the full version is METHODOLOGY.md)
+
+- **Three legs.** A flow-shaped defect needs source **and** propagation **and** sink, each one
+  written down. A leg you assumed is a lead (`leads.py`), not a finding.
+- **Two shapes.** `defect_shape: "flow"` = taint reaches a dangerous operation;
+  `defect_shape: "missing_control"` = a required check is absent from a reachable path. The
+  tracks are named after the **shapes**, not the classes: A is the flow track, B is the absence
+  track. Any class can take either shape, so decide the shape first and route from there. The
+  class × shape × owner matrix in METHODOLOGY §2 leaves **no class unowned** — crypto, DoS,
+  info-leak, misconfiguration, supply chain, memory safety, and TOCTOU all have a home.
+- **Sources are more than input** (METHODOLOGY §1): identity/authorization state, stored
+  second-order values, post-free un-reset state, bailout-orphaned state, cross-request/worker
+  state, uninitialized reuse, and ordering/time are all attacker influence. Families 4–8 are
+  invisible to taint engines and to the call graph.
+- **Seven mandatory passes** (METHODOLOGY §5): P1 entry × privilege map, P2 guard audit on
+  every privileged operation, P3 invariant-violation sweep, P4 long-lived lifetime sweep,
+  P5 taint into *all seven* sink groups, P6 error/exception-path diff, P7 cross-scope and
+  concurrency topology. P4/P6/P7 have no tool support — they are read-the-code passes, and
+  that is where the bugs the scanners left behind live.
+- **Honest bounds.** Reachability is an entry point plus a privilege proven by a call chain;
+  preconditions say default vs non-default; the escalation ceiling is proven, not assumed; an
+  observation seen only under a sanitizer/debug/patched build is a lead until it replays on the
+  stock build. `write_finding.py` enforces all four at `confirmed`.
 
 ## Hard rules (scope & safety)
 
@@ -55,6 +82,7 @@ TaintForge/                        <- repo root (cwd)
   accounts.json                    <- live test accounts (>=2 normal users + admin for IDOR)
   schemas/{finding,code_model}.schema.json
   .agents/skills/
+    _shared/METHODOLOGY.md         <- the universal method every role is bound by
     _shared/write_finding.py       <- the ONLY way to author/update findings (file-locked)
     _shared/leads.py               <- deep-analysis notebook: leads/primitives/notes/chains (file-locked)
     source-model/                  <- Code Model: build_code_model.sh, callgraph.py, coverage.py, proof_ledger.py
@@ -118,10 +146,16 @@ Whitebox roles (default — A/B produce, C converges, D weaponizes, E resolves f
 |---|---|---|---|
 | A (vuln-track-a) | CODE_MODEL `.structural` + OpenGrep leads in `workspace/hints/` | sink-first: anchor a sink, trace **backward** across files to attacker input, judge sanitizers | `findings/*.json` track=A, status=candidate |
 | B (vuln-track-b) | CODE_MODEL `.comprehension` + `_authz_matrix.json` | trace **entry -> resource**; is there an authn/role/**ownership** gate anywhere on the path? a `findById` reachable with no ownership check = IDOR | `findings/*.json` track=B, status=candidate |
-| C (convergence) | `findings/*.json` (continuously) | cross-validate -> reproduce -> disclosure -> PoC -> triage | updates findings; `report/report.md`; `report/<id>/{poc.py,finding.md}` |
-| D (exploitation) | `findings/*.json` status reproduced/confirmed, critical classes only | chain & escalate the proven primitive to max impact; defeat sanitizers/quoting; verify each step | updates findings' `exploit` object (honest `constraints`); `report/<id>/exploit.py` |
+| C (convergence) | `findings/*.json` (continuously) | cross-validate -> reproduce -> official/vendor product review -> disclosure -> PoC -> triage | updates findings; `report/report.md`; `report/<id>/{poc.py,finding.md}` |
+| D (exploitation) | `findings/*.json` status confirmed with a reportable official review, critical classes only | chain & escalate the proven primitive to max impact; defeat sanitizers/quoting; verify each step | updates findings' `exploit` object (honest `constraints`); `report/<id>/exploit.py` |
 | E (reanalysis) | `findings/*.json` status needs_reanalysis + C's reproduction observation | diagnose the missing premise, revisit source and live evidence, then resolve or return with genuinely new evidence | updates via `write_finding.py`; status candidate/cross_validated/reproduced/false_positive |
 | F (DBMS fuzzing, optional) | configured local DBMS sources/endpoints + corpus/crash state | structured wire/SQL mutation, semantic repair, sanitizer/coverage feedback, minimization, exact-stock replay | `workspace/db-fuzz/`; track-A candidates via `write_finding.py` only after the promotion threshold |
+
+Mandatory-pass ownership (METHODOLOGY §5): **B** owns P1 entry × privilege, P2 guard audit,
+P3 invariant sweep. **A** owns P4 lifetime sweep and P5 taint into all seven sink groups.
+**A and B share** P6 error-path diff and P7 cross-scope/concurrency topology; **F** runs the
+native/wire half of P4 and P7 on fuzz targets; **C** runs the §8 self-check before anything is
+reported, and **E** re-runs the pass that failed for each `needs_reanalysis` item.
 
 ## Convergence (C) loop - per finding
 
@@ -133,36 +167,67 @@ Whitebox roles (default — A/B produce, C converges, D weaponizes, E resolves f
      route/CSRF/cookie from the code yourself, log in, then hit protected resources with that
      jar. Flags: `-X`, `-H`, `-d`, `--json`, `--jar`, `--no-redirect`, `--timeout`.
    - **IDOR/authz:** log two accounts into separate jars; request one user's object with the
-     **other's** jar - victim's data back = confirmed. Needs >=2 normal accounts.
+     **other's** jar - victim's data back proves the behavior is reproduced. Needs >=2 normal accounts.
    - **SSRF/blind:** an out-of-band canary runs (host/port in the live-target note). Make the
      target fetch `http://<canary>/<token>`, then `canary.py check <token>` - a HIT proves it.
    - Always record a **PoC**: the exact reproducing request(s) in `repro.poc` and decisive
      evidence in `repro.response`. Set status `reproduced` (live success) or `false_positive`;
      if the live test is inconclusive use `needs_reanalysis` (not stuck `candidate`).
-3. **Disclosure (reproduced/confirmed only):** web-search product+version+vuln vs CVE/NVD,
-   vendor & GitHub advisories, changelogs. Set `disclosure.status` = `known` (refs) / `novel`
-   (potential 0-day) / `inconclusive`. Don't search raw candidates.
-4. **PoC script:** author a `poc.py` (using `requests`) that reproduces THAT vuln - pre-auth
+3. **Official/vendor product-boundary review (mandatory):** compare the exact reproduced behavior,
+   component/version, preconditions, default/supported configuration, documented security boundary,
+   and sink ownership with primary vendor sources: official docs and security guidance, API
+   contracts, default templates/samples, versioned source comments/tests, advisories, release notes,
+   patches, and vendor-owned issues/discussions. For Microsoft targets, Microsoft Learn/MSRC and
+   Microsoft-owned source are primary. A working PoC proves behavior, not a product vulnerability.
+   Store `official_review` with the exact comparison and at least one public HTTPS primary
+   official/vendor documentation, advisory, release, patch, issue, or discussion reference. Local
+   source/test paths and GitHub blob/tree/raw links are supplementary and cannot pass the gate alone.
+   - `product_vulnerability` / `known_vulnerability` -> status `confirmed`.
+   - documented hazard / expected behavior / application misconfiguration / unsupported scenario ->
+     status `not_product_vulnerability`.
+   - inconclusive -> remain `reproduced`; never rank as a 0-day or send to D.
+4. **Disclosure and public-history review (confirmed product vulnerabilities only):** derive exact
+   patch fingerprints from the proof (affected path, symbol, helper/flag, rejection reason, literal,
+   and protocol invariant). Search local/upstream source history with `git log -S/-G`, compare the
+   tested tag with upstream main and supported release branches, then search the canonical vendor
+   repository's open/closed issues and open/merged PRs and follow linked backports. Finally check
+   advisories/CVEs, release notes, servicing notes, and changelogs. A matching public issue, PR,
+   commit, patch, or regression test means `known` even without a CVE or security label. `novel`
+   requires a complete `disclosure.public_history` record containing the upstream repository, at
+   least two exact anchors, source-history evidence, issue/PR searches, advisory/release searches,
+   and the main/release comparison. Otherwise use `inconclusive`; triage must not show a potential
+   0-day. Don't spend this search on raw candidates.
+5. **PoC script:** author a `poc.py` (using `requests`) that reproduces THAT vuln - pre-auth
    bugs have no login step, multi-step flows have as many requests as needed, print PASS/FAIL.
    Store the full source in `repro.poc_script`, then run `emit_poc.py` to materialize
    `report/<id>/{poc.py,finding.md}`. One folder per vuln - never merged.
-5. **Triage:** `triage.py` writes the ranked `report/report.md` (with a potential-0-day
-   section). The dashboard regenerates report + per-vuln folders every few seconds.
+6. **Triage:** `triage.py` writes the ranked `report/report.md` (with a potential-0-day
+   section only for officially reviewed product vulnerabilities). The dashboard regenerates the
+   report and eligible per-vuln folders every few seconds.
 
 ## Findings lifecycle
 
 ```
-candidate --cross-val--> cross_validated --repro--> reproduced --> confirmed
-                                              |
-                                  repro fails +--> false_positive   (discarded from ranking)
-                                              +--> needs_reanalysis  (feedback -> E investigates)
+candidate --cross-val--> cross_validated --repro--> reproduced --official review--> confirmed
+                                              |              |
+                                  repro fails |              +--> not_product_vulnerability
+                                              |                   (documented/expected/app config/unsupported)
+                                              +--> false_positive
+                                              +--> needs_reanalysis
 ```
 
 - Convergence consumes `findings/` **continuously** - it never waits for producers to finish.
 - `needs_reanalysis` is the feedback loop: C flips the flag, E exclusively diagnoses it and
   returns it only with new evidence or closes it as false positive.
-- Severity from the producer is provisional; **reproduction outcome dominates** final ranking.
-- Every finding carries a `correlation_id` so multiple paths to one root cause de-dup.
+- Severity from the producer is provisional; **reproduction plus the official product-boundary
+  verdict** dominates final ranking. Reproduced behavior is not automatically a vendor bug.
+- Every finding carries a `correlation_id` so multiple paths to one root cause de-dup. One root
+  cause is one finding; trigger variants are reproduction cases on it, not separate findings.
+- `confirmed` additionally requires the evidence contract (METHODOLOGY §7): `defect_shape`,
+  `reachability{entry_point,min_privilege,pre_auth}`, `preconditions.default_configuration`
+  (plus `required_settings` when it is false), `primitive.escalation_ceiling`, and - for any
+  observation made under instrumentation - `repro.stock_replay`. `write_finding.py` rejects a
+  confirmation without them, so fill them while the evidence is in front of you.
 
 ## Tooling
 

@@ -104,6 +104,29 @@ Coverage prioritizes deep-dive-worthy modules (parsers, deserializers, dispatche
 reflection code) where such chains hide. A lead is never a finding by itself — but it's kept,
 not discarded, because it may be the missing piece another session needs.
 
+## The method every role is bound by
+
+`.agents/skills/_shared/METHODOLOGY.md` is the class- and language-agnostic contract each role
+reads after `AGENTS.md`. Four things it fixes that a sink-first scanner alone gets wrong:
+
+- **Two shapes, not one.** A defect is either a *dangerous flow* (`defect_shape: "flow"`) or a
+  *missing control* (`defect_shape: "missing_control"`). Tracks A and B are named after the
+  shapes, not the classes — so a crypto, DoS, info-leak, misconfiguration, supply-chain,
+  memory-safety, or TOCTOU bug always has an owner instead of falling between the two tracks.
+- **Sources are more than request input.** Identity/authorization state, stored second-order
+  values, post-free un-reset state, bailout-orphaned state, cross-request/worker state,
+  uninitialized reuse, and ordering are all attacker influence — and the last five are
+  invisible to every taint engine and to the call graph.
+- **Seven mandatory passes.** Entry × privilege map, guard audit, invariant sweep, long-lived
+  lifetime sweep, taint into *all seven* sink groups, error/exception-path diff, and
+  cross-scope/concurrency topology. The last three have no tool support on purpose: they are
+  read-the-code passes, and that is where the bugs the scanners left behind live.
+- **Honest bounds, enforced.** `write_finding.py` refuses to mark a finding `confirmed` without
+  its shape, its reachability (entry point + minimum privilege + pre-auth, proven by a call
+  chain), its preconditions (default vs named non-default settings), and a proven escalation
+  ceiling — and an observation made only under a sanitizer or patched build stays a lead until
+  `repro.stock_replay` records a run on the stock build.
+
 ## Layout
 
 ```
@@ -119,7 +142,7 @@ taintforge/                         ← repo root (run from here)
     code_model.schema.json          ← contract: the Code Model
     finding.schema.json             ← contract: one finding (drives convergence)
   .agents/skills/                   ← Codex discovers skills here
-    _shared/        write_finding.py (file-locked finding writer), budget_guard.py (token cap), leads.py (deep-analysis notebook: leads/primitives/chains)
+    _shared/        METHODOLOGY.md (the method every role is bound by), write_finding.py (file-locked finding writer), budget_guard.py (token cap), leads.py (deep-analysis notebook: leads/primitives/chains)
     source-model/   build the Code Model (structural + comprehension); coverage.py, callgraph.py, proof_ledger.py
     hypothesize/    gen_hypotheses.py, catalog.json, cwe_to_hypotheses.py (business-logic hypotheses)
     vuln-track-a/   injection/data-flow finder; run_semgrep.sh leads, rules/
