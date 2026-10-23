@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # TaintForge launcher with a live tmux dashboard.
 #
-# audit.sh starts A/B/C/D/E and optionally DBMS fuzzer F. tmux gives every role its own pane.
+# audit.sh starts A/B/C/D/E. tmux gives every role its own pane.
 #
 # Usage:  ./start.sh [-u URL] [--accounts FILE] targets/<app>
 # Detach: Ctrl-b then d. Re-attach: tmux attach -t taintforge
@@ -36,10 +36,9 @@ rm -f workspace/_stop workspace/_pids
 RUNNER_ENV=()
 for name in MAX_HOURS SPAWN_ONLY TF_REUSE_SEED TF_MAX_REANALYSIS \
   TF_BACKEND TF_MODEL \
-  TF_DBMS_FUZZ TF_DBMS_ENGINES DBFUZZ_DSN_FILE \
   SSRF_HOST SSRF_PORT CANARY_HOST CANARY_PORT TAINTFORGE_EXTRA_CONTEXT \
   TAINTFORGE_DYNAMIC_CONTEXT TF_PY \
-  CODEX_CMD CODEX_CMD_A CODEX_CMD_B CODEX_CMD_C CODEX_CMD_D CODEX_CMD_E CODEX_CMD_F; do
+  CODEX_CMD CODEX_CMD_A CODEX_CMD_B CODEX_CMD_C CODEX_CMD_D CODEX_CMD_E; do
   if [[ -v "$name" ]]; then
     RUNNER_ENV+=("$name=${!name}")
   fi
@@ -77,10 +76,6 @@ P_C="$(tmux split-window -v -t "$P_A" -P -F '#{pane_id}' "$(mklog C)")"
 P_D="$(tmux split-window -v -t "$P_B" -P -F '#{pane_id}' "$(mklog D)")"
 P_E="$(tmux split-window -v -t "$P_C" -P -F '#{pane_id}' "$(mklog E)")"
 P_DASH="$(tmux split-window -v -t "$P_D" -P -F '#{pane_id}' "$DASHBOARD")"
-P_F=""
-if [ "${TF_DBMS_FUZZ:-0}" = "1" ]; then
-  P_F="$(tmux split-window -v -t "$P_E" -P -F '#{pane_id}' "$(mklog F)")"
-fi
 tmux select-layout -t "$SESS:forge" tiled
 
 tmux set -t "$SESS" default-terminal "tmux-256color"
@@ -117,14 +112,12 @@ tmux select-pane -t "$P_B" -T "B  AUTH / logic  [$(rolemodel B)]"
 tmux select-pane -t "$P_C" -T "C  TRIAGE  [$(rolemodel C)]"
 tmux select-pane -t "$P_D" -T "D  EXPLOIT  [$(rolemodel D)]"
 tmux select-pane -t "$P_E" -T "E  REANALYSIS  [$(rolemodel E)]"
-[ -z "$P_F" ] || tmux select-pane -t "$P_F" -T "F  DBMS FUZZ  [$(rolemodel F)]"
 tmux select-pane -t "$P_DASH" -T "DASHBOARD"
 tmux select-window -t "$SESS:forge"
 tmux select-pane -t "$P_C"
 
 PANES="$(tmux list-panes -t "$SESS:forge" -F '#{pane_id}' | wc -l | tr -d ' ')"
 EXPECTED_PANES=6
-[ -z "$P_F" ] || EXPECTED_PANES=7
 [ "$PANES" = "$EXPECTED_PANES" ] || {
   echo "tmux setup failed - expected $EXPECTED_PANES panes, got $PANES" >&2
   exit 1
@@ -139,7 +132,7 @@ done
   exit 1
 }
 
-echo "tmux '$SESS' ready with A/B/C/D/E${P_F:+/F} + dashboard."
+echo "tmux '$SESS' ready with A/B/C/D/E + dashboard."
 if [ "${TAINTFORGE_NO_ATTACH:-0}" = "1" ]; then
   exit 0
 fi

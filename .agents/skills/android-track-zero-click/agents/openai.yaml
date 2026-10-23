@@ -1,4 +1,0 @@
-interface:
-  display_name: "Android Zero-Click Track"
-  short_description: "Analyze passive Android trigger-to-sink chains"
-  default_prompt: "Use $android-track-zero-click to analyze passive and zero-click Android attack chains."

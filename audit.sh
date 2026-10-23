@@ -1,13 +1,12 @@
 #!/usr/bin/env bash
 # TaintForge white-box parallel role runner.
 #
-# Five core Codex sessions, plus optional DBMS fuzzer F, share the locked findings queue:
+# Five Codex sessions share the locked findings queue:
 #   A - injection / data-flow producer
 #   B - logic / access-control producer
 #   C - cross-validation, reproduction, disclosure, and triage
 #   D - exploitation and RCE chaining
 #   E - needs_reanalysis diagnosis and retriage
-#   F - adaptive DBMS protocol/SQL memory-corruption fuzzing (TF_DBMS_FUZZ=1)
 #
 # Usage:
 #   ./audit.sh targets/<app>
@@ -35,7 +34,6 @@ usage() {
 usage: ./audit.sh [-u URL] [--accounts FILE] targets/<app>
 
 Five independent Codex sessions run A/B/C/D/E concurrently and share workspace/.
-Set TF_DBMS_FUZZ=1 to add F, the local DBMS memory-corruption fuzzer.
 EOF
 }
 
@@ -66,13 +64,8 @@ TARGET="$(realpath --relative-to="$ROOT" "$TARGET_REAL")"
 S=".agents/skills"
 MAX_HOURS="${MAX_HOURS:-12}"
 SPAWN_ONLY="${SPAWN_ONLY:-0}"
-TF_DBMS_FUZZ="${TF_DBMS_FUZZ:-0}"
 [[ "$MAX_HOURS" =~ ^[1-9][0-9]*$ ]] || {
   echo "error: MAX_HOURS must be a positive integer" >&2
-  exit 2
-}
-[[ "$TF_DBMS_FUZZ" =~ ^[01]$ ]] || {
-  echo "error: TF_DBMS_FUZZ must be 0 or 1" >&2
   exit 2
 }
 
@@ -154,6 +147,22 @@ else
 fi
 
 PCAN=""
+CANARY_PORT="${SSRF_PORT:-${CANARY_PORT:-9111}}"
+CANARY_HOST="${SSRF_HOST:-${CANARY_HOST:-127.0.0.1}}"
+CANARY_NOTE="An out-of-band canary is available at http://$CANARY_HOST:$CANARY_PORT. Use probe.py,
+browser_probe.py, and canary.py as directed by the role skills."
+
+# Idempotent: a canary another session already left listening is reused rather than fought over.
+start_canary() {
+  if (exec 3<>/dev/tcp/"$CANARY_HOST"/"$CANARY_PORT") 2>/dev/null; then
+    echo "== canary already listening on $CANARY_HOST:$CANARY_PORT =="
+    return
+  fi
+  python3 "$S/convergence/scripts/canary.py" serve --port "$CANARY_PORT" \
+    --log workspace/_canary.log > workspace/_log_canary.txt 2>&1 &
+  PCAN=$!
+}
+
 DYNAMIC_CONTEXT="No live instance was provided. Perform static analysis only. When a finding
 needs dynamic proof, record that limitation honestly instead of guessing."
 if [ -n "$URL" ]; then
@@ -168,17 +177,20 @@ different identities when reproducing access-control findings."
 and record where authenticated reproduction remains unavailable."
   fi
 
-  CANARY_PORT="${SSRF_PORT:-${CANARY_PORT:-9111}}"
-  CANARY_HOST="${SSRF_HOST:-${CANARY_HOST:-127.0.0.1}}"
-  python3 "$S/convergence/scripts/canary.py" serve --port "$CANARY_PORT" \
-    --log workspace/_canary.log > workspace/_log_canary.txt 2>&1 &
-  PCAN=$!
+  start_canary
   DYNAMIC_CONTEXT="The only authorized live target is $URL.
 $ACCOUNT_CONTEXT
-An out-of-band canary is available at http://$CANARY_HOST:$CANARY_PORT. Use probe.py,
-browser_probe.py, and canary.py as directed by the role skills. Never send traffic to any
-other host."
+$CANARY_NOTE Never send traffic to any other host."
   echo "== live target: $URL | accounts: $ACCOUNT_CONTEXT | canary: $CANARY_HOST:$CANARY_PORT =="
+elif [ "${TF_CANARY:-0}" = "1" ]; then
+  # Desktop/CLI targets have no URL but still need an out-of-band oracle (an SSRF or callback
+  # reached from a locally built copy of the target). Without this a campaign script has to
+  # hand-roll the listener, which is how it drifts from the one audit.sh tears down.
+  start_canary
+  DYNAMIC_CONTEXT="No live service was provided; dynamic work happens only against a locally
+built copy of the target in the authorized lab. $CANARY_NOTE Never send traffic to any other
+host."
+  echo "== no --url: local-lab mode | canary: $CANARY_HOST:$CANARY_PORT =="
 else
   echo "== no --url: static-only mode =="
 fi
@@ -285,46 +297,7 @@ decisive live proof. Mark it false_positive when disproved or when the retry cap
 without new evidence. Never bounce a finding unchanged. Record every update only through
 write_finding.py, then continue polling."
 
-MISSION_F="You are F, the adaptive DBMS memory-corruption fuzzing producer in an authorized local
-TaintForge campaign. Do not delegate. Read AGENTS.md, .agents/skills/_shared/METHODOLOGY.md, and the dbms-fuzzing skill completely before
-acting.
-
-Repository root: $ROOT
-Primary read-only assessment target: $TARGET
-Additional authorized DBMS source roots, when present, are only directories named by
-TF_DBMS_ENGINES under $ROOT/targets and the source entries in harnesses/dbms_fuzz/targets.json.
-Persistent state: $ROOT/workspace/db-fuzz
-Stop flag: $ROOT/workspace/_stop
-Enabled engines: ${TF_DBMS_ENGINES:-auto}
-
-Own wire-preauth, low-privilege SQL-executor, coverage-guided, sanitizer, minimization, and exact
-stock-replay lanes for configured PostgreSQL, Redis, MySQL, MariaDB, and Oracle targets. Begin with
-dbfuzz.py doctor and run only engines whose local loopback endpoint or source prerequisite exists.
-Never contact a non-loopback address. Never place a password in prompts, logs, corpus, commands, or
-tracked files; authenticated SQL may read a DSN only from the mode-0600 path in DBFUZZ_DSN_FILE.
-Keep targets/ read-only and build from a copy under .labs/db-fuzz. Oracle remains black-box unless
-an authorized instrumentable server build is supplied.
-
-F owns memory safety and authentication-state corruption, not ordinary query correctness. Do not
-spend campaign budget promoting planner-result, index-integrity, or business-logic mismatches.
-Prefer ASan+UBSan source-copy runtimes, binary protocol/type receive/COPY paths, allocator and
-lifetime stress, and stateful parser sequences. A result mismatch without sanitizer evidence,
-abnormal backend termination, or a controlled memory primitive is mutation feedback only.
-
-Continuously improve the harness and corpus from source review, historical patch families,
-protocol/SQL state novelty, coverage, sanitizer output, debug/stock divergence, and rejection
-feedback. Prefer structured mutation and semantic repair; AFL++ counts only when it observes
-server-side coverage. Persist deterministic inputs and minimize suspicious cases. A crash is a
-lead, not RCE. Record partial capabilities with leads.py and author a track-A candidate only via
-write_finding.py after deterministic memory corruption, auth-state bypass, or controlled memory
-primitive is independently established. Hand proven candidates to C, RCE-capable primitives to D,
-and precise failed premises to E. Continue until workspace/_stop appears."
-
-if [ "$TF_DBMS_FUZZ" = "1" ]; then
-  echo "== launching 6 independent Codex sessions (A/B/C/D/E/F) =="
-else
-  echo "== launching 5 independent Codex sessions (A/B/C/D/E) =="
-fi
+echo "== launching 5 independent Codex sessions (A/B/C/D/E) =="
 DEADLINE=$(( $(date +%s) + MAX_HOURS * 3600 ))
 STOP="workspace/_stop"
 rm -f "$STOP"
@@ -372,15 +345,10 @@ supervise C workspace/_log_C.txt "$MISSION_C"; P_C="$SUPERVISOR_PID"
 supervise D workspace/_log_D.txt "$MISSION_D"; P_D="$SUPERVISOR_PID"
 supervise E workspace/_log_E.txt "$MISSION_E"; P_E="$SUPERVISOR_PID"
 ROLE_PIDS=("$P_A" "$P_B" "$P_C" "$P_D" "$P_E")
-P_F=""
-if [ "$TF_DBMS_FUZZ" = "1" ]; then
-  supervise F workspace/_log_F.txt "$MISSION_F"; P_F="$SUPERVISOR_PID"
-  ROLE_PIDS+=("$P_F")
-fi
 ALL_PIDS=("${ROLE_PIDS[@]}")
 [ -z "$PCAN" ] || ALL_PIDS+=("$PCAN")
 printf '%s\n' "${ALL_PIDS[*]}" > workspace/_pids
-echo "  A=$P_A B=$P_B C=$P_C D=$P_D E=$P_E${P_F:+ F=$P_F} (${MAX_HOURS}h supervisors)"
+echo "  A=$P_A B=$P_B C=$P_C D=$P_D E=$P_E (${MAX_HOURS}h supervisors)"
 
 stop_all() {
   touch "$STOP"

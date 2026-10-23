@@ -15,8 +15,6 @@ Set TF_TOKEN_BUDGET=0 (default) to disable the guard entirely.
 Usage:
   budget_guard.py --check          # exit 0 always; touches _stop if over budget; prints usage
   budget_guard.py --report         # just print cumulative tokens, no side effects
-  budget_guard.py --check --log-glob 'workspace/android/_log_*.txt' \
-      --stop workspace/_android_stop
 """
 import argparse, glob, os, re, sys
 

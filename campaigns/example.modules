@@ -1,0 +1,10 @@
+# example: name:path pairs, path relative to the target root.
+# Each gets a full model at workspace/cm/<name>.json (see ./seed.sh).
+# Pick the areas that carry the target's security boundaries, not the whole tree.
+routes:app/http
+auth:app/auth
+admin:app/admin
+api:app/api
+models:app/models
+templates:resources/views
+uploads:app/storage

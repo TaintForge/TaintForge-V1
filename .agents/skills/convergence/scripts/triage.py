@@ -173,19 +173,6 @@ def main():
             if cons: L.append(f"  - constraints (honest bounds): {'; '.join(cons)}")
             byp=ex.get('mitigations_bypassed') or []
             if byp: L.append(f"  - mitigations bypassed: {'; '.join(byp)}")
-    android_findings=[f for f in ranked if f.get("android")]
-    if android_findings:
-        L.append("\n## Android reachability\n")
-        L.append("| id | track | component | delivery | interaction | boundary | evidence | zero-click |")
-        L.append("|----|-------|-----------|----------|-------------|----------|----------|------------|")
-        for f in android_findings:
-            a=f.get("android") or {}
-            L.append(
-                f"| {f.get('id','?')} | {f.get('track','?')} | {a.get('component','?')} | "
-                f"{a.get('delivery','?')} | {a.get('interaction','?')} | "
-                f"{a.get('execution_boundary','?')} | {a.get('evidence_grade','?')} | "
-                f"{a.get('zero_click_claim','not-applicable')} |"
-            )
     if non_product:
         L.append("\n## Reproduced but not a product vulnerability\n")
         for f in non_product:
@@ -252,21 +239,12 @@ def main():
             L.append("- assets: " + ", ".join(f['assets_affected']))
         if f.get('evidence'): L.append(f"- evidence: {f['evidence']}")
         rep=f.get('repro',{})
-        android=f.get('android') or {}
         local_runtime="microsoft.netcore.app" in str(rep.get('env','')).lower()
-        if android:
-            L.append(
-                f"- android: component={android.get('component','?')} "
-                f"delivery={android.get('delivery','?')} interaction={android.get('interaction','?')} "
-                f"boundary={android.get('execution_boundary','?')} "
-                f"evidence={android.get('evidence_grade','?')} "
-                f"zero-click={android.get('zero_click_claim','not-applicable')}"
-            )
         if rep.get('attempted'):
             L.append(f"- repro: success={rep.get('success')} | {rep.get('observation','')}")
             if rep.get('poc'):
                 L.append("- PoC:")
-                L.append("```bash" if (android or local_runtime) else "```http")
+                L.append("```bash" if local_runtime else "```http")
                 L.append(str(rep['poc']).strip())
                 L.append("```")
             if rep.get('response'):

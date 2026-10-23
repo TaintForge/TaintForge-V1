@@ -1,4 +1,0 @@
-interface:
-  display_name: "Android WebView Track"
-  short_description: "Trace unsafe WebView inputs and native bridges"
-  default_prompt: "Use $android-track-webview to audit WebView URL handling, settings, and JavaScript bridges."

@@ -1,4 +1,0 @@
-interface:
-  display_name: "Android Component Track"
-  short_description: "Audit Android component types and IPC paths"
-  default_prompt: "Use $android-track-components to audit Activities, Services, Receivers, Providers, Binder, and PendingIntent flows."

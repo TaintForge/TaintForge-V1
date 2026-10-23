@@ -6,9 +6,8 @@ Tools (the ast+regex extractor, OpenGrep/CodeQL, probe.py, canary.py, browser_pr
 active_probe.py) only give leads and cross-checks; a tool hit is a place to look, never a
 finding by itself.
 
-There are two modes. **Whitebox (default)** runs five core roles, with optional DBMS fuzzer F,
-sharing one streaming queue,
-`workspace/findings/`:
+TaintForge assesses **web applications and web-facing services** by reading their source.
+Five roles share one streaming queue, `workspace/findings/`:
 
 - **A — producer, injection / data-flow.** Skill: `vuln-track-a`.
 - **B — producer, logic / access-control.** Skill: `vuln-track-b`.
@@ -20,9 +19,6 @@ sharing one streaming queue,
 - **E — reanalysis.** Skill: `convergence`, plus the producer skill matching the finding track.
   Owns `needs_reanalysis`, diagnoses the failed premise or missing evidence, and returns only
   evidence-backed items to C for retriage.
-- **F — DBMS fuzzing (optional).** Skill: `dbms-fuzzing`. Runs structured wire/SQL, sanitizer,
-  coverage-guided, minimization, and stock-replay lanes for authorized local Redis, MySQL,
-  MariaDB, PostgreSQL, and Oracle targets. Enable with `TF_DBMS_FUZZ=1`.
 
 The primary objective is demonstrable **pre-authentication RCE**, followed by **authenticated
 RCE**. Lower-impact findings matter mainly when they provide a credible link in an RCE chain.
@@ -64,8 +60,7 @@ your role skill.** It is class- and language-agnostic and every role is bound by
   file-locked and append-only, safe for concurrent sessions. Never hand-edit a finding file
   or overwrite another finding.
 - Dynamic reproduction, probing, and exploitation hit **only** the live target URL you were
-  given, the local SSRF canary, and for enabled F campaigns the loopback DBMS endpoints in
-  `harnesses/dbms_fuzz/targets.json` — never any other host. Agent D weaponizes findings
+  given and the local SSRF canary — never any other host. Agent D weaponizes findings
   for assets you own or are authorized to test; it never targets a host it wasn't pointed at.
 - Findings must validate against `schemas/finding.schema.json`; CODE_MODEL against
   `schemas/code_model.schema.json`.
@@ -75,10 +70,12 @@ your role skill.** It is class- and language-agnostic and every role is bound by
 ```
 TaintForge/                        <- repo root (cwd)
   AGENTS.md                        <- you are here
-  audit.sh                         <- seed + five core sessions + optional F
-  start.sh                         <- tmux wrapper: A/B/C/D/E[/F] logs + dashboard
+  seed.sh                          <- code model + per-module models + coverage + hypotheses
+  audit.sh                         <- five role sessions against a seeded target
+  start.sh                         <- tmux wrapper: A/B/C/D/E logs + dashboard
+  campaigns/                       <- per-target launchers and module lists (local, untracked)
   .codex/config.toml               <- project multi-agent concurrency settings
-  .codex/agents/*.toml             <- A/B/C/D/E/F role definitions
+  .codex/agents/*.toml             <- A/B/C/D/E role definitions
   accounts.json                    <- live test accounts (>=2 normal users + admin for IDOR)
   schemas/{finding,code_model}.schema.json
   .agents/skills/
@@ -91,8 +88,6 @@ TaintForge/                        <- repo root (cwd)
     vuln-track-b/                  <- logic/access-control finder; build_authz_matrix.py
     convergence/                   <- cross_validate.sh, correlate.py, probe.py, canary.py,
                                       browser_probe.py, triage.py, emit_poc.py, queue.py, dashboard.py
-    dbms-fuzzing/                  <- adaptive local DBMS fuzzing contract
-  harnesses/dbms_fuzz/             <- shared DBMS wire/SQL fuzz runner and build helper
   targets/<app>                    <- code under assessment (read-only)
   workspace/                       <- your persistent memory (notebook across respawns)
     CODE_MODEL.json, coverage.json (whitebox)
@@ -140,7 +135,7 @@ modules first), `--summary` reports entry-point-surface progress separately.
 
 ## Role contracts
 
-Whitebox roles (default — A/B produce, C converges, D weaponizes, E resolves feedback, F fuzzes DBMS targets when enabled):
+A/B produce, C converges, D weaponizes, E resolves feedback:
 
 | Role | Reads | Method | Writes |
 |---|---|---|---|
@@ -149,13 +144,12 @@ Whitebox roles (default — A/B produce, C converges, D weaponizes, E resolves f
 | C (convergence) | `findings/*.json` (continuously) | cross-validate -> reproduce -> official/vendor product review -> disclosure -> PoC -> triage | updates findings; `report/report.md`; `report/<id>/{poc.py,finding.md}` |
 | D (exploitation) | `findings/*.json` status confirmed with a reportable official review, critical classes only | chain & escalate the proven primitive to max impact; defeat sanitizers/quoting; verify each step | updates findings' `exploit` object (honest `constraints`); `report/<id>/exploit.py` |
 | E (reanalysis) | `findings/*.json` status needs_reanalysis + C's reproduction observation | diagnose the missing premise, revisit source and live evidence, then resolve or return with genuinely new evidence | updates via `write_finding.py`; status candidate/cross_validated/reproduced/false_positive |
-| F (DBMS fuzzing, optional) | configured local DBMS sources/endpoints + corpus/crash state | structured wire/SQL mutation, semantic repair, sanitizer/coverage feedback, minimization, exact-stock replay | `workspace/db-fuzz/`; track-A candidates via `write_finding.py` only after the promotion threshold |
 
 Mandatory-pass ownership (METHODOLOGY §5): **B** owns P1 entry × privilege, P2 guard audit,
 P3 invariant sweep. **A** owns P4 lifetime sweep and P5 taint into all seven sink groups.
-**A and B share** P6 error-path diff and P7 cross-scope/concurrency topology; **F** runs the
-native/wire half of P4 and P7 on fuzz targets; **C** runs the §8 self-check before anything is
-reported, and **E** re-runs the pass that failed for each `needs_reanalysis` item.
+**A and B share** P6 error-path diff and P7 cross-scope/concurrency topology. **C** runs the
+§8 self-check before anything is reported, and **E** re-runs the pass that failed for each
+`needs_reanalysis` item.
 
 ## Convergence (C) loop - per finding
 

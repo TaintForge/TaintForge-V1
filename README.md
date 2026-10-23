@@ -298,21 +298,6 @@ The root orchestrator auto-respawns until `MAX_HOURS` (default 12) or `workspace
 continues returned role threads while alive. To run longer, raise `MAX_HOURS=24`. State in
 `workspace/` persists across runs, so replacement threads resume instead of starting over.
 
-### Android APK mode
-
-Android APKs use a separate six-role pipeline for Manifest/permissions, component-type
-analysis, cross-component sink chains, WebView, native zero-click surfaces, and emulator
-convergence:
-
-```bash
-./android-audit.sh --seed-only targets/app.apk
-./android-audit.sh targets/app.apk
-./android-audit.sh --serial emulator-5554 targets/app.apk
-```
-
-See [docs/ANDROID_WORKFLOW_KR.md](docs/ANDROID_WORKFLOW_KR.md) for the role contract,
-toolchain, evidence grading, and emulator-only safety boundary.
-
 ### Watch progress
 
 With `start.sh` the dashboard pane shows this live. Headless? In a separate shell:

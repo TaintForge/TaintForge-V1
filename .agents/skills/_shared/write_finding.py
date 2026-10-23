@@ -242,13 +242,7 @@ def main():
     f = json.loads(raw)
 
     f.setdefault("track", "B")
-    detector_by_track = {
-        "A": "llm-track-a", "B": "llm-track-b",
-        "F": "llm-track-f", "G": "llm-track-g",
-        "H": "llm-track-h", "I": "llm-track-i",
-        "J": "llm-track-j", "K": "llm-track-k", "L": "llm-track-l",
-        "M": "llm-track-m", "N": "llm-track-n", "W": "llm-track-w",
-    }
+    detector_by_track = {"A": "llm-track-a", "B": "llm-track-b"}
     f.setdefault("detector", detector_by_track.get(f["track"], "llm-track-a"))
     f.setdefault("status", "candidate")
     # retry cap: count how many times this finding is bounced to needs_reanalysis, so C can

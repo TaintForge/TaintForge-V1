@@ -26,29 +26,11 @@ asdf-workspace/
 
 claude-agent/
 
-# patch-variant oracle build output
-harnesses/dotnet_fuzz/patch_variants/ldap_dn_oracle/bin/
-harnesses/dotnet_fuzz/patch_variants/ldap_dn_oracle/obj/
-
-# patch-variant framing oracle build output
-.labs/dotnet/h-chunk-framing/bin/
-.labs/dotnet/h-chunk-framing/obj/
-.labs/dotnet/h-chunk-framing/*.log
-
 # stray workspace snapshots (can be many GB)
 workspace-*-before-*/
 
-# harness build output and fuzzing corpora - rebuildable, and bin/ carries
-# redistributed Microsoft assemblies that must not live in the repo
-harnesses/**/bin/
-harnesses/**/obj/
-harnesses/dbms_fuzz/corpus/
-
 # backup of the pre-Claude launcher
 *.codex-backup
-
-# compiled patch-variant oracles (rebuildable from the adjacent source)
-harnesses/dotnet_fuzz/patch_variants/*/oracle
 
 # local lab account files (live test credentials) - keep accounts.json.example only
 *.accounts.json
@@ -59,3 +41,10 @@ harnesses/dotnet_fuzz/patch_variants/*/oracle
 # engagement output: unfiled vulnerability reports for a live bug-bounty target.
 # Never push these - publishing is a disclosure decision, not a commit.
 h1-wordpress/
+
+# per-target campaign launchers and module lists: target-specific config, not harness.
+# campaigns/README.md and the example pair are the committed contract.
+campaigns/*
+!campaigns/README.md
+!campaigns/example.sh
+!campaigns/example.modules

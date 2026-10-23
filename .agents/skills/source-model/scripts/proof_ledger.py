@@ -62,6 +62,7 @@ def main():
     ap.add_argument("--show"); ap.add_argument("--json",action="store_true"); ap.add_argument("--done")
     ap.add_argument("--verdict",choices=["safe","finding","needs_reanalysis","unknown"],default="unknown")
     ap.add_argument("--finding",default=""); ap.add_argument("--evidence",default=""); ap.add_argument("--note",default="")
+    ap.add_argument("--findings",default="workspace/findings",help="where --verdict finding ids are checked")
     args=ap.parse_args(); data=load(args.ledger)
     if args.summary: summarize(data); return
     if args.list:
@@ -81,6 +82,18 @@ def main():
     if args.done:
         u=find_unit(data,args.done)
         if not u: sys.exit(f"[proof_ledger] unit not found: {args.done}")
+        # A disposition without its evidence is an unchecked claim, and "safe" is the claim that
+        # closes a unit forever - so it must name the check that makes it safe. A "finding"
+        # verdict must point at a finding file that actually exists, not at a remembered id.
+        if args.verdict=="safe" and len(args.evidence.strip())<10:
+            sys.exit("[proof_ledger] --verdict safe requires --evidence naming the exact check "
+                     "(guard/sanitizer/authz) and why it covers every caller")
+        if args.verdict=="finding":
+            if not args.finding.strip():
+                sys.exit("[proof_ledger] --verdict finding requires --finding <id> from write_finding.py")
+            fpath=os.path.join(args.findings,f"{args.finding.strip()}.json")
+            if not os.path.exists(fpath):
+                sys.exit(f"[proof_ledger] no such finding: {fpath} - write it with write_finding.py first")
         now=_dt.datetime.now(_dt.timezone.utc).isoformat()
         u["status"]="needs_reanalysis" if args.verdict=="needs_reanalysis" else "done"
         u["verdict"]=args.verdict; u["updated_at"]=now

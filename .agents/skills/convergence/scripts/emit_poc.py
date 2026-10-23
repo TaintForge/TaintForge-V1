@@ -5,7 +5,7 @@ emit_poc.py - materialize a per-vuln folder for every confirmed product vulnerab
   workspace/report/<id>/finding.md <- the individual report for that one vulnerability
 
 This script does NOT invent or parse PoC steps. The convergence agent writes a poc.py that
-fits the actual vulnerability (web PoCs typically use requests; Android PoCs invoke the
+fits the actual vulnerability (web PoCs typically use requests
 emulator-only wrapper) and stores the full source in finding.repro.poc_script. We persist it.
 If poc_script is missing we still write a finding.md and a small stub poc.py noting it's
 absent, so the folder is never empty - but an eligible confirmed finding SHOULD carry poc_script.
@@ -26,7 +26,6 @@ def finding_md(f):
     r = f.get("repro", {}) or {}
     d = f.get("disclosure", {}) or {}
     official = f.get("official_review", {}) or {}
-    android = f.get("android", {}) or {}
     src, sink = f.get("source", {}) or {}, f.get("sink", {}) or {}
     L = [f"# {f.get('title','(untitled)')}", "",
          f"- **id**: `{f.get('id')}`  ",
@@ -93,20 +92,13 @@ def finding_md(f):
         L += ["## Assets affected", "", "- " + "\n- ".join(f["assets_affected"]), ""]
     if f.get("evidence"):
         L += ["## Evidence", "", str(f["evidence"]), ""]
-    if android:
-        L += ["## Android context", "",
-              f"- package/component: `{android.get('package','?')}` / `{android.get('component','?')}`  ",
-              f"- type: {android.get('component_type','?')} | delivery: {android.get('delivery','?')}  ",
-              f"- interaction: {android.get('interaction','?')} | boundary: {android.get('execution_boundary','?')}  ",
-              f"- evidence grade: {android.get('evidence_grade','?')} | zero-click: {android.get('zero_click_claim','not-applicable')}  ",
-              f"- API/ABI: {android.get('api_level','?')} / {android.get('abi','?')}  ", ""]
     L += ["## Reproduction", "",
           f"- attempted: {r.get('attempted')} | success: {r.get('success')}"]
     if r.get("observation"): L.append(f"- observation: {r['observation']}")
     if r.get("response"): L.append(f"- response evidence: {r['response']}")
     local_runtime = "microsoft.netcore.app" in str(r.get("env", "")).lower()
     if r.get("poc"):
-        L += ["", "Recorded reproduction command(s):", "```bash" if (android or local_runtime) else "```http",
+        L += ["", "Recorded reproduction command(s):", "```bash" if local_runtime else "```http",
               str(r["poc"]).strip(), "```"]
     ex = f.get("exploit", {}) or {}
     if ex.get("depth"):
@@ -120,7 +112,7 @@ def finding_md(f):
         if ex.get("oob_evidence"): L.append(f"- OOB evidence: {ex['oob_evidence']}")
         if ex.get("working_poc","").strip():
             L += ["", "Run the weaponized exploit:", "```bash", "python3 exploit.py", "```"]
-    run_lines = ["python3 poc.py"] if (android or local_runtime) else ["pip install requests   # if needed", "python3 poc.py"]
+    run_lines = ["python3 poc.py"] if local_runtime else ["pip install requests   # if needed", "python3 poc.py"]
     L += ["", "## Run the PoC", "```bash", *run_lines, "```",
           "", f"_generated {datetime.datetime.now(datetime.timezone.utc).isoformat()}_"]
     return "\n".join(L)
