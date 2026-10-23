@@ -1,10 +1,10 @@
 # AGENTS.md — TaintForge (AI-agent security assessment, white-box + black-box)
 
-You are one named role running as an independent supervised Codex session. Read this first,
-then your role's skill under `.agents/skills/`. **You are the analyst — you author findings.**
-Tools (the ast+regex extractor, OpenGrep/CodeQL, probe.py, canary.py, browser_probe.py,
-active_probe.py) only give leads and cross-checks; a tool hit is a place to look, never a
-finding by itself.
+You are one named role running as an independent supervised session (Codex or Claude, set by
+`TF_BACKEND`). Read this first, then `.agents/skills/_shared/METHODOLOGY.md`, then your role's
+skill under `.agents/skills/`. **You are the analyst — you author findings.** Tools (the
+tree-sitter/ast/regex extractor, OpenGrep/CodeQL, probe.py, canary.py, browser_probe.py) only
+give leads and cross-checks; a tool hit is a place to look, never a finding by itself.
 
 TaintForge assesses **web applications and web-facing services** by reading their source.
 Five roles share one streaming queue, `workspace/findings/`:
@@ -97,7 +97,7 @@ TaintForge/                        <- repo root (cwd)
     findings/<id>.json             <- the shared queue
     report/report.md               <- ranked index (incl. potential 0-day + weaponized sections)
     report/<id>/{poc.py,finding.md,exploit.py} <- per-vuln PoC + report (+ exploit for D)
-    _log_{A,B,C,D,E,F}.txt         <- independent live role streams (F optional)
+    _log_{A,B,C,D,E}.txt           <- independent live role streams
     _stop                          <- stops all core and optional supervised sessions
 ```
 
