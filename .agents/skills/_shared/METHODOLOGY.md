@@ -52,7 +52,7 @@ done. That table is what `reachability` in every finding is derived from.
 
 ## 1. SOURCE catalog — "attacker influence", not just "input"
 
-Eight families. Families 4–7 are invisible to taint engines *and* to the structural call
+Eight families. Families 4–8 are invisible to taint engines *and* to the structural call
 graph; they are found only by reading lifetime and error paths.
 
 1. **Direct input** — request params/headers/cookies/body, uploads, env, IPC, deserialized
@@ -89,7 +89,7 @@ class falls between A and B.
 | SSRF / request forgery | input URL → server-side fetch (http/dns/socket) | no destination allowlist, no metadata-IP block; no CSRF token | A (SSRF) / B (CSRF) |
 | Path & file | input → path (traversal/LFI/RFI), upload name/type | no normalization, no root confinement, no type check | A |
 | Deserialization / object injection | untrusted bytes → `unserialize`/`pickle`/gadget | no type allowlist, no signature | A |
-| Memory safety | input or post-free state → `memcpy`/index/deref/function pointer | no length, NULL, or lifetime guard (UAF/OOB/type confusion) | A, or F on native fuzz targets |
+| Memory safety | input or post-free state → `memcpy`/index/deref/function pointer | no length, NULL, or lifetime guard (UAF/OOB/type confusion) | A |
 | Concurrency / TOCTOU | shared state mutated between check and use | no lock, no atomicity, no idempotency | B (logic/state), A (memory/lifetime races) |
 | Crypto | secret/input → weak algorithm, fixed IV, non-constant-time compare | no verification, predictable randomness, plaintext storage | B |
 | Resource / DoS | input size/count → unbounded alloc, loop, recursion | fd/lock/memory never released, no rate limit or quota | A (flow) / B (absence) |
@@ -170,10 +170,10 @@ One finding is never the end. Run every pass to exhaustion, driven by
 | P1 | **Entry × privilege map** — every entry point gets the lowest privilege that reaches it, and the sensitive operations that privilege can touch. Pre-auth reachability is proven with a call chain. | every ledger route unit has a privilege | B |
 | P2 | **Guard audit on privileged operations** (shape B) — for every operation needing ownership, role, state, or payment: does an authz/ownership/state check actually sit on *that* path, on *every* caller? | every privileged op has finding / safe+evidence / needs_reanalysis | B |
 | P3 | **Invariant-violation sweep** — for each invariant from §0: is there an input, ordering, or concurrency that breaks it? | every invariant in `HYPOTHESES.json` is verified or refuted | B |
-| P4 | **Long-lived lifetime sweep** — for every global or long-lived field holding a pointer, handle, fd, or lock: (a) where is it released, (b) where is it reset, (c) can a bailout happen in between? All three true = candidate. | every such field triaged | A (F on native targets) |
+| P4 | **Long-lived lifetime sweep** — for every global or long-lived field holding a pointer, handle, fd, or lock: (a) where is it released, (b) where is it reset, (c) can a bailout happen in between? All three true = candidate. | every such field triaged | A |
 | P5 | **Taint → every sink family** — forward every source from §1 into **all seven** groups of §3, especially the disclosure sinks (headers/cookies/logs/timing) and SSRF. | every enumerated sink unit has a disposition | A |
 | P6 | **Error/exception path diff** — diff the set of checks and cleanups that run on the success path against the failure path. A skipped check is a bypass; a skipped release is a leak or a dangling reference. | every guarded operation with a failure path diffed | A + B |
-| P7 | **Cross-scope & concurrency topology** — re-judge reachability assuming request reuse, worker reuse, and concurrent execution. | every stateful operation judged under reuse | A + B (F for wire-level) |
+| P7 | **Cross-scope & concurrency topology** — re-judge reachability assuming request reuse, worker reuse, and concurrent execution. | every stateful operation judged under reuse | A + B |
 
 P4, P6, and P7 have no tool support in this repo. They are read-the-code passes, and they
 are where the bugs that survived the scanners live.

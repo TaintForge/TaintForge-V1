@@ -88,14 +88,12 @@ if [ "${TF_BACKEND:-codex}" = "claude" ]; then
   CODEX_CMD_C="${CODEX_CMD_C:-$_tf_claude}"
   CODEX_CMD_D="${CODEX_CMD_D:-$_tf_claude}"
   CODEX_CMD_E="${CODEX_CMD_E:-$_tf_claude}"
-  CODEX_CMD_F="${CODEX_CMD_F:-$_tf_claude}"
 fi
 
 CODEX_CMD="${CODEX_CMD:-codex exec --sandbox workspace-write --config sandbox_workspace_write.network_access=true --config web_search=live --model gpt-6-sol --config model_reasoning_effort=xhigh}"
 CODEX_CMD_C="${CODEX_CMD_C:-codex exec --sandbox workspace-write --config sandbox_workspace_write.network_access=true --config web_search=live --model gpt-6-sol --config model_reasoning_effort=xhigh}"
 CODEX_CMD_D="${CODEX_CMD_D:-codex exec --sandbox workspace-write --config sandbox_workspace_write.network_access=true --config web_search=live --model gpt-6-sol --config model_reasoning_effort=xhigh}"
 CODEX_CMD_E="${CODEX_CMD_E:-codex exec --sandbox workspace-write --config sandbox_workspace_write.network_access=true --config web_search=live --model gpt-6-sol --config model_reasoning_effort=xhigh}"
-CODEX_CMD_F="${CODEX_CMD_F:-codex exec --sandbox workspace-write --config sandbox_workspace_write.network_access=true --config web_search=live --model gpt-6-sol --config model_reasoning_effort=xhigh}"
 
 if [ "${TF_REUSE_SEED:-0}" = "1" ]; then
   echo "== seed: validating and reusing existing Code Model, coverage, and hypotheses =="

@@ -154,7 +154,8 @@ P3 invariant sweep. **A** owns P4 lifetime sweep and P5 taint into all seven sin
 ## Convergence (C) loop - per finding
 
 1. **Cross-validate** with an independent engine (`cross_validate.sh` + `correlate.py`):
-   CodeQL where supported; **CodeQL has no PHP**, so PHP targets auto-fall back to OpenGrep.
+   CodeQL by default; **CodeQL ships no PHP pack**, so on a PHP target the CodeQL run fails
+   and `cross_validate.sh` falls back to OpenGrep (same path as codeql being absent).
    Agreement -> status `cross_validated`.
 2. **Reproduce** against the live URL (only if one was provided):
    - `probe.py` is **session-aware** - `--jar FILE` persists cookies. Work out the login
